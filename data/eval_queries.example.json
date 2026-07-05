@@ -1,0 +1,22 @@
+[
+  {
+    "query": "猫在车上",
+    "library": "all",
+    "relevant_ids": []
+  },
+  {
+    "query": "猫在车底",
+    "library": "all",
+    "relevant_ids": []
+  },
+  {
+    "query": "带字幕的访谈视频",
+    "library": "all",
+    "relevant_ids": []
+  },
+  {
+    "query": "城市街道上的车",
+    "library": "all",
+    "relevant_ids": []
+  }
+]

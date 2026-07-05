@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>多模态素材语义管理系统</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>多模态素材语义管理系统</h1>
+          <p>CLIP 跨模态检索 + Agent 调度，面向图片、视频和个人素材管理。</p>
+        </div>
+        <div class="upload-group">
+          <select id="uploadLibrary" title="上传目标库">
+            <option value="personal" selected>上传到个人库</option>
+            <option value="public">上传到公共库</option>
+          </select>
+          <label class="upload">
+            <input id="fileInput" type="file" multiple accept="image/*,video/*,.pdf,.docx,.pptx,.txt,.md" />
+            <span>上传素材</span>
+          </label>
+        </div>
+      </header>
+
+      <nav class="view-tabs" aria-label="功能导航">
+        <button class="tab-button active" type="button" data-view="searchView">语义检索</button>
+        <button class="tab-button" type="button" data-view="libraryView">素材库</button>
+        <button class="tab-button" type="button" data-view="tagView">标签浏览</button>
+        <button class="tab-button" type="button" data-view="peopleView">人物相册</button>
+        <button class="tab-button" type="button" data-view="systemView">系统状态</button>
+      </nav>
+
+      <section class="status" id="status">系统已就绪。</section>
+
+      <section id="searchView" class="view active">
+        <section class="searchbar">
+          <input id="queryInput" type="search" placeholder="试试：瀑布视频、篮球、城市街道、猫、人物走路视频" />
+          <button id="searchButton">检索</button>
+        </section>
+        <section class="search-options">
+          <label>
+            <span>展示数量</span>
+            <select id="resultLimit">
+              <option value="24">24</option>
+              <option value="36" selected>36</option>
+              <option value="60">60</option>
+              <option value="80">80</option>
+            </select>
+          </label>
+          <label>
+            <span>检索范围</span>
+            <select id="searchLibrary">
+              <option value="all" selected>全部库</option>
+              <option value="personal">个人库</option>
+              <option value="public">公共库</option>
+            </select>
+          </label>
+          <label class="check-option">
+            <input id="strictFilter" type="checkbox" />
+            <span>严格筛选低相关结果</span>
+          </label>
+        </section>
+        <section class="agent-plan" id="agentPlan"></section>
+        <section class="work-panel">
+          <div class="panel-title">检索结果</div>
+          <div id="resultGrid" class="grid"></div>
+        </section>
+      </section>
+
+      <section id="libraryView" class="view">
+        <section class="work-panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">素材库</div>
+              <p id="assetSummary">进入本页后加载素材缩略图。</p>
+            </div>
+            <div class="library-tools">
+              <select id="assetKindFilter" title="素材类型筛选">
+                <option value="all">全部素材</option>
+                <option value="image">只看图片</option>
+                <option value="video">只看视频</option>
+              </select>
+              <select id="assetLibraryFilter" title="素材库筛选">
+                <option value="all">全部库</option>
+                <option value="personal">个人库</option>
+                <option value="public">公共库</option>
+              </select>
+            </div>
+          </div>
+          <div id="assetList" class="asset-list"></div>
+        </section>
+      </section>
+
+      <section id="tagView" class="view">
+        <section class="tag-browser">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">标签浏览</div>
+              <p id="tagSummary">按标签聚合素材，适合做归档检查和演示。</p>
+            </div>
+            <select id="tagLibraryFilter" title="标签库筛选">
+              <option value="all">全部库</option>
+              <option value="personal">个人库</option>
+              <option value="public">公共库</option>
+            </select>
+          </div>
+          <div class="tag-browser-layout">
+            <div id="tagFacetList" class="tag-facet-list"></div>
+            <div id="tagAssetList" class="asset-list"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="peopleView" class="view">
+        <section class="person-panel">
+          <div class="person-panel-head">
+            <div>
+              <strong>人物相册</strong>
+              <span id="personStats">进入本页后读取个人库人物。</span>
+            </div>
+            <div class="person-actions">
+              <button id="mergePersons" type="button">合并选中</button>
+              <button id="rebuildPersons" type="button">重建人物聚类</button>
+            </div>
+          </div>
+          <div id="personList" class="person-list"></div>
+          <aside id="personDetail" class="person-detail-panel">
+            <div class="empty compact">选择一个人物分组查看主页。</div>
+          </aside>
+        </section>
+      </section>
+
+      <section id="systemView" class="view">
+        <section class="system-grid">
+          <div class="system-card">
+            <div class="panel-title">模型状态</div>
+            <div class="model-status" id="modelStatus">尚未读取。</div>
+          </div>
+          <div class="system-card">
+            <div class="panel-title">素材统计</div>
+            <div class="model-status" id="libraryStats">尚未读取。</div>
+          </div>
+          <div class="system-card">
+            <div class="panel-title">Agent 智能建议</div>
+            <div id="agentRecommendations" class="recommendation-list">尚未读取。</div>
+          </div>
+          <div class="system-card">
+            <div class="panel-title">检索评测</div>
+            <div class="task-actions">
+              <button id="runEvaluation" type="button">运行对比评测</button>
+            </div>
+            <div id="evaluationPanel" class="evaluation-panel">尚未运行评测。</div>
+          </div>
+          <div class="system-card">
+            <div class="panel-title">后台处理任务</div>
+            <div class="task-actions">
+              <button id="startVideoOcrTask" type="button">启动视频字幕 OCR</button>
+              <button id="refreshTasks" type="button">刷新任务</button>
+            </div>
+            <div id="taskList" class="task-list">尚未读取任务。</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="assetDialog" class="asset-dialog">
+      <form method="dialog" class="dialog-panel">
+        <header class="dialog-header">
+          <div>
+            <div class="dialog-kicker" id="detailKind">素材详情</div>
+            <h2 id="detailTitle">素材详情</h2>
+          </div>
+          <button class="icon-button" id="detailClose" value="cancel" aria-label="关闭">x</button>
+        </header>
+        <div class="dialog-content">
+          <div class="detail-media" id="detailMedia"></div>
+          <section class="detail-info">
+            <div class="detail-grid" id="detailMeta"></div>
+            <div id="healthPanel" class="health-panel"></div>
+            <label class="tag-editor">
+              <span>人工标签</span>
+              <textarea id="manualTagsInput" rows="3" placeholder="用逗号或空格分隔，例如：train, outdoor, good_material"></textarea>
+            </label>
+            <div class="detail-actions">
+              <button type="button" id="saveManualTags">保存标签</button>
+              <button type="button" id="favoriteAsset">设为精选</button>
+              <button type="button" id="deleteAsset" class="danger-button">删除素材</button>
+              <span id="detailStatus"></span>
+            </div>
+            <div>
+              <h3>标签来源</h3>
+              <div id="tagRows" class="tag-cloud"></div>
+            </div>
+              <div>
+                <h3>人物命中</h3>
+                <div id="faceRows" class="face-list">暂无人物</div>
+              </div>
+              <div>
+                <h3>Agent 归档建议</h3>
+                <div id="archiveRows" class="archive-suggestion-list"></div>
+              </div>
+              <div class="text-signal-panel">
+                <h3>文本信号摘要</h3>
+              <div id="textSummaryRows" class="text-summary-grid"></div>
+              <h3>音频转写 ASR</h3>
+              <div id="asrText" class="ocr-box">暂无音频转写</div>
+              <h3>画面/字幕 OCR</h3>
+              <div id="ocrText" class="ocr-box">暂无画面文字</div>
+              <h3>文本信号明细</h3>
+              <div id="textSignalRows" class="text-signal-list"></div>
+            </div>
+            <div>
+              <h3>相似素材推荐</h3>
+              <div id="similarRows" class="similar-grid"></div>
+            </div>
+          </section>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/app.js?v=20260703-3"></script>
+  </body>
+</html>

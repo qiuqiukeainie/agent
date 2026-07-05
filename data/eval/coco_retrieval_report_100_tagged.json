@@ -1,0 +1,251 @@
+{
+  "query_count": 100,
+  "asset_count": 526,
+  "backend": "numpy",
+  "recall_at_1": 0.68,
+  "recall_at_5": 0.96,
+  "recall_at_10": 1.0,
+  "mrr_at_10": 0.7927,
+  "examples": [
+    {
+      "query": "A cat eating a bird it has caught.",
+      "expected": "000000046378.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000046378.jpg",
+        "000000049810.jpg",
+        "000000022892.jpg",
+        "000000010363.jpg",
+        "000000023272.jpg"
+      ]
+    },
+    {
+      "query": "The telephone has a banana where the receiver should be.",
+      "expected": "000000012667.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000012667.jpg",
+        "000000028809.jpg",
+        "000000002587.jpg",
+        "000000003661.jpg",
+        "000000052413.jpg"
+      ]
+    },
+    {
+      "query": "A banana replacing the phone on an answering machine",
+      "expected": "000000012667.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000012667.jpg",
+        "000000028809.jpg",
+        "000000003661.jpg",
+        "000000002587.jpg",
+        "000000013004.jpg"
+      ]
+    },
+    {
+      "query": "A phone with a banana where the receiver should be.",
+      "expected": "000000012667.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000012667.jpg",
+        "000000028809.jpg",
+        "000000003661.jpg",
+        "000000002587.jpg",
+        "000000052413.jpg"
+      ]
+    },
+    {
+      "query": "A telephone has it receiver replaced with a banana.",
+      "expected": "000000012667.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000012667.jpg",
+        "000000028809.jpg",
+        "000000002587.jpg",
+        "000000003661.jpg",
+        "000000013004.jpg"
+      ]
+    },
+    {
+      "query": "A white cat caught a bird outside on a patio.",
+      "expected": "000000046378.jpg",
+      "rank": 2,
+      "top_results": [
+        "000000049810.jpg",
+        "000000046378.jpg",
+        "000000022892.jpg",
+        "000000025560.jpg",
+        "000000001675.jpg"
+      ]
+    },
+    {
+      "query": "A sculpture of two women stting on a bench with their purses on the ground while people standing in a line behind them. ",
+      "expected": "000000011511.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000011511.jpg",
+        "000000028993.jpg",
+        "000000012670.jpg",
+        "000000016249.jpg",
+        "000000008211.jpg"
+      ]
+    },
+    {
+      "query": "Grey house cat devours a song bird on a door step",
+      "expected": "000000046378.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000046378.jpg",
+        "000000022892.jpg",
+        "000000049810.jpg",
+        "000000001675.jpg",
+        "000000056545.jpg"
+      ]
+    },
+    {
+      "query": "A metal statue of two women sits on a bench in a city street.",
+      "expected": "000000011511.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000011511.jpg",
+        "000000017436.jpg",
+        "000000008211_1.jpg",
+        "000000008211.jpg",
+        "000000016249.jpg"
+      ]
+    },
+    {
+      "query": "A black trash bag in a restroom next to a sink.",
+      "expected": "000000051598.jpg",
+      "rank": 7,
+      "top_results": [
+        "000000027982.jpg",
+        "000000035770.jpg",
+        "000000055002.jpg",
+        "000000005503.jpg",
+        "000000003156.jpg"
+      ]
+    },
+    {
+      "query": "a garbage bag in a white lighted bathroom",
+      "expected": "000000051598.jpg",
+      "rank": 4,
+      "top_results": [
+        "000000006818.jpg",
+        "000000055002.jpg",
+        "000000032285.jpg",
+        "000000051598.jpg",
+        "000000005503.jpg"
+      ]
+    },
+    {
+      "query": "A long haired cat eating a dead bird.",
+      "expected": "000000046378.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000046378.jpg",
+        "000000049810.jpg",
+        "000000001675.jpg",
+        "000000015497.jpg",
+        "000000022892.jpg"
+      ]
+    },
+    {
+      "query": "A statue of two women with purses sitting on a bench. ",
+      "expected": "000000011511.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000011511.jpg",
+        "000000017436.jpg",
+        "000000028993.jpg",
+        "000000035963.jpg",
+        "000000030828.jpg"
+      ]
+    },
+    {
+      "query": "The bathroom has a wall sink, medicine cabinet, toothbrush holder, and bare walls.",
+      "expected": "000000051598.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000051598.jpg",
+        "000000010977.jpg",
+        "000000034760.jpg",
+        "000000035770.jpg",
+        "000000006213.jpg"
+      ]
+    },
+    {
+      "query": "A door is open to a white bathroom that has a black garbage back on the floor.",
+      "expected": "000000051598.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000051598.jpg",
+        "000000010977.jpg",
+        "000000038070.jpg",
+        "000000042276.jpg",
+        "000000032285.jpg"
+      ]
+    },
+    {
+      "query": "A statue of two people sitting on a bench.",
+      "expected": "000000011511.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000011511.jpg",
+        "000000017436.jpg",
+        "000000016249.jpg",
+        "000000029397.jpg",
+        "000000030828.jpg"
+      ]
+    },
+    {
+      "query": "The bathroom door is open with the light on.",
+      "expected": "000000051598.jpg",
+      "rank": 2,
+      "top_results": [
+        "000000014007.jpg",
+        "000000051598.jpg",
+        "000000010977.jpg",
+        "000000006213.jpg",
+        "000000053505.jpg"
+      ]
+    },
+    {
+      "query": "A metal statue of two women sitting on a bench.",
+      "expected": "000000011511.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000011511.jpg",
+        "000000017436.jpg",
+        "000000030828.jpg",
+        "000000008211_1.jpg",
+        "000000008211.jpg"
+      ]
+    },
+    {
+      "query": "A flying plane with smoke trailing behind it.",
+      "expected": "000000044652.jpg",
+      "rank": 2,
+      "top_results": [
+        "000000024027.jpg",
+        "000000044652.jpg",
+        "000000022396.jpg",
+        "000000052017.jpg",
+        "images_1.jpg"
+      ]
+    },
+    {
+      "query": "An single passanger in an airplane flying through the sky",
+      "expected": "000000044652.jpg",
+      "rank": 1,
+      "top_results": [
+        "000000044652.jpg",
+        "000000022396.jpg",
+        "000000052017.jpg",
+        "000000001761.jpg",
+        "images_1.jpg"
+      ]
+    }
+  ]
+}

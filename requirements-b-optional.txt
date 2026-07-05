@@ -1,0 +1,5 @@
+# Optional dependencies for B face module.
+# Install only on machines that need real InsightFace-based person clustering.
+
+insightface
+onnxruntime

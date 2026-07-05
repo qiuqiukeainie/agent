@@ -1,0 +1,11 @@
+# Optional dependencies for C module.
+# Install only when this machine needs real OCR/ASR extraction.
+
+# OCR option 1: easiest Python-only integration, downloads OCR models on first use.
+easyocr
+
+# ASR option 1: faster CPU Whisper runtime, downloads model on first use.
+faster-whisper
+
+# Chinese keyword segmentation for better fusion tags.
+jieba

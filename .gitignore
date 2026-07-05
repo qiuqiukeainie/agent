@@ -1,0 +1,43 @@
+# Python/runtime
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE/local
+.idea/
+.vscode/
+.agents/
+
+# Model and generated caches
+.model_cache/
+data/models/
+data/thumbs/
+data/index.json
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*_stdout.log
+data/*_stderr.log
+data/server_stdout.log
+data/server_stderr.log
+
+# Datasets and user assets. Keep only placeholders/examples in Git.
+data/datasets/
+data/uploads/*
+data/video_samples/
+!data/.gitkeep
+!data/uploads/.gitkeep
+!data/eval_queries.example.json
+
+# Generated experiment outputs
+data/*.csv
+data/ocr_probe.png
+data/video_thumb_*.jpg
+data/person_*.json
+
+# Local packages/archives
+qjc*.zip
+qjc_package_stage/
+face_module.zip
