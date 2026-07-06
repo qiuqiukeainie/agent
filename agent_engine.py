@@ -291,6 +291,8 @@ class QueryPlan:
     trace: list[dict[str, object]]
     relation_queries: list[str]
     negative_relation_queries: list[str]
+    strict_conditions: dict[str, object]
+    negative_conditions: dict[str, list[str]]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -318,7 +320,12 @@ class SearchAgent:
             "actions": extract_mapped_words(normalized, ACTION_WORDS),
             "media": extract_media_words(normalized),
             "time_words": extract_time_words(normalized),
+            "text_signals": extract_text_signal_words(normalized),
+            "quality": extract_quality_words(normalized),
         }
+        negative_conditions = extract_negative_conditions(normalized)
+        unresolved = remove_negative_from_positive(unresolved, negative_conditions)
+        strict_conditions = infer_strict_conditions(normalized)
         executable_filters = infer_executable_filters(normalized, now)
         semantic_queries = build_semantic_queries(normalized, unresolved)
         relation_queries = build_relation_queries(unresolved)
@@ -355,9 +362,13 @@ class SearchAgent:
                 semantic_queries,
                 relation_queries,
                 negative_relation_queries,
+                strict_conditions,
+                negative_conditions,
             ),
             relation_queries=relation_queries,
             negative_relation_queries=negative_relation_queries,
+            strict_conditions=strict_conditions,
+            negative_conditions=negative_conditions,
         )
 
 
@@ -404,8 +415,14 @@ def extract_people(query: str) -> list[str]:
         "\u4eca\u5e74",
         "\u51ac\u5929",
         "\u590f\u5929",
+        "clip",
+        "agent",
+        "ocr",
+        "asr",
+        "ppt",
+        "pdf",
     }
-    return unique([item for item in people if item not in stop_words])
+    return unique([item for item in people if item.lower() not in stop_words])
 
 
 def extract_time_words(query: str) -> list[str]:
@@ -421,7 +438,8 @@ def extract_time_words(query: str) -> list[str]:
 def extract_location_words(query: str) -> list[str]:
     found = [word for word in sorted(LOCATION_WORDS, key=len, reverse=True) if word in query]
     found.extend(re.findall(r"\u5728([\u4e00-\u9fffA-Za-z0-9_]{2,12}?)(?:\u62cd|\u7684|\u5408\u5f71|\u7167\u7247|\u56fe\u7247)", query))
-    return unique([item for item in found if not re.match(r"person[_-]?\d+", item, flags=re.IGNORECASE)])
+    invalid = {"\u8f66\u5e95", "\u8f66\u4e0a", "\u5de6\u8fb9", "\u53f3\u8fb9"}
+    return unique([item for item in found if item not in invalid and not re.match(r"person[_-]?\d+", item, flags=re.IGNORECASE)])
 
 
 def extract_scene_words(query: str) -> list[str]:
@@ -468,7 +486,108 @@ def extract_media_words(query: str) -> list[str]:
         media.append("video")
     if any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u76f8\u7247"]):
         media.append("image")
+    if any(word in query.lower() for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md"]):
+        media.append("document")
     return media
+
+
+def extract_text_signal_words(query: str) -> list[str]:
+    signals = []
+    lowered = query.lower()
+    if any(word in lowered for word in ["ocr", "\u753b\u9762\u6587\u5b57", "\u56fe\u7247\u91cc\u7684\u5b57", "\u5e26\u6587\u5b57"]):
+        signals.append("ocr")
+    if any(word in lowered for word in ["asr", "\u97f3\u9891", "\u8bed\u97f3", "\u8bf4\u5230", "\u8bb2\u5230", "\u8f6c\u5199"]):
+        signals.append("asr")
+    if any(word in query for word in ["\u5b57\u5e55", "\u5e26\u5b57\u5e55"]):
+        signals.append("subtitle")
+    if any(word in query for word in ["\u6587\u6863", "\u6b63\u6587", "\u62a5\u544a"]):
+        signals.append("document")
+    return unique(signals)
+
+
+def extract_quality_words(query: str) -> list[str]:
+    quality = []
+    if any(word in query for word in ["\u4e0d\u8981\u592a\u6697", "\u6392\u9664\u592a\u6697", "\u4e0d\u592a\u6697"]):
+        quality.append("exclude_dark")
+    if any(word in query for word in ["\u6e05\u6670", "\u9ad8\u6e05", "\u6e05\u695a"]):
+        quality.append("clear")
+    if any(word in query for word in ["\u4e0d\u8981\u91cd\u590d", "\u6392\u9664\u91cd\u590d", "\u53bb\u91cd"]):
+        quality.append("deduplicate")
+    if any(word in query for word in ["\u4e3b\u4f53\u660e\u786e", "\u6709\u4e3b\u4f53"]):
+        quality.append("clear_subject")
+    return unique(quality)
+
+
+def extract_negative_conditions(query: str) -> dict[str, list[str]]:
+    negative_text = []
+    for marker in ["\u4e0d\u8981", "\u4e0d\u542b", "\u4e0d\u5305\u542b", "\u6392\u9664", "\u4e0d\u662f", "\u975e"]:
+        start = 0
+        while True:
+            index = query.find(marker, start)
+            if index < 0:
+                break
+            fragment = query[index + len(marker): index + len(marker) + 18]
+            fragment = re.split(r"[,，。；;\s]|\u7684|\u4e14|\u5e76\u4e14|\u6216|\u4f46", fragment, maxsplit=1)[0]
+            if fragment:
+                negative_text.append(fragment)
+            start = index + len(marker)
+    joined = " ".join(negative_text)
+    return {
+        "objects": extract_object_words(joined),
+        "scenes": extract_scene_words(joined),
+        "media": extract_media_words(joined),
+        "raw": unique(negative_text),
+    }
+
+
+def remove_negative_from_positive(
+    unresolved: dict[str, list[str]],
+    negative_conditions: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    cleaned = {key: list(value) for key, value in unresolved.items()}
+    for key in ["objects", "scenes", "media"]:
+        negative_values = set(negative_conditions.get(key, []))
+        if negative_values:
+            cleaned[key] = [item for item in cleaned.get(key, []) if item not in negative_values]
+    negative_object_prompts = {
+        first_prompt(item, EN_OBJECT_PROMPTS)
+        for item in negative_conditions.get("objects", [])
+    }
+    if negative_object_prompts:
+        cleaned["relations"] = [
+            relation
+            for relation in cleaned.get("relations", [])
+            if not any(prompt and prompt in relation for prompt in negative_object_prompts)
+        ]
+    return cleaned
+
+
+def infer_strict_conditions(query: str) -> dict[str, object]:
+    conditions: dict[str, object] = {}
+    if any(word in query for word in ["\u4e2a\u4eba\u5e93", "\u6211\u7684\u7d20\u6750", "\u6211\u7684\u76f8\u518c", "\u79c1\u4eba"]):
+        conditions["library"] = "personal"
+    elif any(word in query for word in ["\u516c\u5171\u5e93", "\u516c\u5171\u7d20\u6750"]):
+        conditions["library"] = "public"
+
+    people_count = infer_people_count(query)
+    if people_count:
+        conditions["people_count"] = people_count
+
+    if any(word in query for word in ["\u5fc5\u987b", "\u53ea\u8981", "\u4e00\u5b9a\u8981", "\u4e25\u683c"]):
+        conditions["strict_mode"] = True
+    return conditions
+
+
+def infer_people_count(query: str) -> int | None:
+    for count, words in [
+        (2, ["\u4e24\u4e2a\u4eba", "\u4e8c\u4eba", "\u4e24\u4eba", "\u53cc\u4eba"]),
+        (3, ["\u4e09\u4e2a\u4eba", "\u4e09\u4eba"]),
+        (4, ["\u56db\u4e2a\u4eba", "\u56db\u4eba"]),
+    ]:
+        if any(word in query for word in words):
+            return count
+    match = re.search(r"(\d+)\s*\u4e2a?\u4eba", query)
+    return int(match.group(1)) if match else None
 
 
 def infer_executable_filters(query: str, now: datetime) -> dict[str, str | int | None]:
@@ -502,6 +621,8 @@ def infer_executable_filters(query: str, now: datetime) -> dict[str, str | int |
         media_kind = "video"
     elif any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u5408\u5f71", "\u76f8\u7247"]):
         media_kind = "image"
+    elif any(word in query.lower() for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md"]):
+        media_kind = "document"
 
     return {"year": year, "season": season, "kind": media_kind}
 
@@ -776,6 +897,8 @@ def build_agent_trace(
     semantic_queries: list[str],
     relation_queries: list[str],
     negative_relation_queries: list[str],
+    strict_conditions: dict[str, object],
+    negative_conditions: dict[str, list[str]],
 ) -> list[dict[str, object]]:
     trace = [
         {
@@ -786,7 +909,11 @@ def build_agent_trace(
         {
             "stage": "condition_split",
             "title": "条件拆解",
-            "detail": {key: value for key, value in unresolved.items() if value},
+            "detail": {
+                "positive": {key: value for key, value in unresolved.items() if value},
+                "strict": strict_conditions,
+                "negative": {key: value for key, value in negative_conditions.items() if value},
+            },
         },
         {
             "stage": "query_rewrite",
@@ -815,7 +942,10 @@ def build_agent_trace(
         {
             "stage": "filter_plan",
             "title": "可执行过滤",
-            "detail": {key: value for key, value in executable_filters.items() if value},
+            "detail": {
+                **{key: value for key, value in executable_filters.items() if value},
+                **strict_conditions,
+            },
         },
         ]
     )

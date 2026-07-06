@@ -303,6 +303,9 @@ class VectorEngine:
             return []
 
         library = normalize_library_filter(library)
+        strict_library = plan.strict_conditions.get("library")
+        if library == "all" and strict_library in {"public", "personal"}:
+            library = str(strict_library)
         query_vectors = [self.encoder.encode_text(item) for item in plan.semantic_queries]
         relation_vectors = [self.encoder.encode_text(item) for item in plan.relation_queries]
         negative_relation_vectors = [self.encoder.encode_text(item) for item in plan.negative_relation_queries]
@@ -319,8 +322,17 @@ class VectorEngine:
 
             metadata_score, metadata_hits = metadata_match(plan, asset)
             tags = self.metadata.get_asset_tags(asset.id)
+            text_signals = self.metadata.list_text_signals(asset.id)
+            faces = self.metadata.get_asset_faces(asset.id)
             tag_score, tag_hits = tag_match(plan, tags)
             ocr_score, ocr_hits = ocr_match(plan, self.metadata.get_ocr_text(asset.id))
+            constraint_score, constraint_hits, constraint_penalty, constraint_misses = constraint_match(
+                plan,
+                asset,
+                tags,
+                text_signals,
+                faces,
+            )
             filename_score = keyword_score(plan.raw_query, asset.filename)
             relation_score, relation_hits, relation_margin = relation_match(
                 plan,
@@ -329,7 +341,7 @@ class VectorEngine:
                 relation_vectors,
                 negative_relation_vectors,
             )
-            geometry_score, geometry_hits = geometric_relation_match(plan, self.metadata.get_asset_faces(asset.id))
+            geometry_score, geometry_hits = geometric_relation_match(plan, faces)
             if geometry_hits:
                 relation_score = max(relation_score, geometry_score)
                 relation_hits = sorted({*relation_hits, *geometry_hits})
@@ -342,6 +354,8 @@ class VectorEngine:
                 ocr_score=ocr_score,
                 relation_score=relation_score,
             )
+            if profile == "agent_v3":
+                score = score + 0.12 * constraint_score - constraint_penalty
 
             rows.append(
                 {
@@ -363,6 +377,10 @@ class VectorEngine:
                     "ocr_score": round(float(ocr_score), 4),
                     "ocr_hits": ocr_hits,
                     "metadata_score": round(float(metadata_score), 4),
+                    "constraint_score": round(float(constraint_score), 4),
+                    "constraint_hits": constraint_hits,
+                    "constraint_misses": constraint_misses,
+                    "constraint_penalty": round(float(constraint_penalty), 4),
                     "relation_score": round(float(relation_score), 4),
                     "relation_margin": round(float(relation_margin), 4),
                     "relation_hits": relation_hits,
@@ -376,6 +394,8 @@ class VectorEngine:
                         tag_hits=tag_hits,
                         ocr_hits=ocr_hits,
                         metadata_hits=metadata_hits,
+                        constraint_hits=constraint_hits,
+                        constraint_misses=constraint_misses,
                         relation_hits=relation_hits,
                         filename_score=filename_score,
                         best_prompt=best_prompt,
@@ -429,7 +449,7 @@ class VectorEngine:
             "vector_model": self.encoder.name,
             "asset_count": len(self.assets),
             "indexed_count": sum(1 for item in self.assets if item.vector_model == self.encoder.name),
-            "agent": "planner-agent-v3",
+            "agent": "search-orchestrator-v4",
             "vector_index": self.vector_index.backend,
             "supported_video_types": sorted(SUPPORTED_VIDEO_TYPES),
             "supported_document_types": sorted(SUPPORTED_DOCUMENT_TYPES),
@@ -442,6 +462,8 @@ class VectorEngine:
                 "metadata_filter",
                 "fusion_rerank",
                 "relation_contrast_rerank",
+                "strict_condition_rerank",
+                "negative_condition_penalty",
                 "clarification_hints",
             ],
         }
@@ -1398,6 +1420,93 @@ def metadata_match(plan: QueryPlan, asset: Asset) -> tuple[float, list[str]]:
     return matched / expected, hits
 
 
+def constraint_match(
+    plan: QueryPlan,
+    asset: Asset,
+    tags: list[str],
+    text_signals: list[dict],
+    faces: list[dict],
+) -> tuple[float, list[str], float, list[str]]:
+    expected = 0
+    matched = 0
+    hits: list[str] = []
+    misses: list[str] = []
+    penalty = 0.0
+    tag_text = " ".join(tags).lower()
+    filename = asset.filename.lower()
+    text_blob = " ".join(str(item.get("text", "")) for item in text_signals).lower()
+    signal_types = {str(item.get("text_type", "")).lower() for item in text_signals}
+
+    people_count = plan.strict_conditions.get("people_count")
+    if isinstance(people_count, int) and people_count > 0:
+        expected += 1
+        detected_people = len({str(face.get("person_id", "")) for face in faces if face.get("person_id")})
+        if detected_people >= people_count:
+            matched += 1
+            hits.append(f"人物数量>={people_count}")
+        else:
+            misses.append(f"人物数量不足{people_count}")
+            penalty += 0.08
+
+    text_signal_aliases = {
+        "ocr": {"ocr", "subtitle_ocr"},
+        "subtitle": {"subtitle_ocr", "ocr"},
+        "asr": {"asr"},
+        "document": {"document_text", "manual_text"},
+    }
+    for signal in plan.unresolved_conditions.get("text_signals", []):
+        expected += 1
+        allowed = text_signal_aliases.get(signal, {signal})
+        tag_hit = signal in tag_text or ("subtitle" in tag_text and signal == "subtitle")
+        if signal_types & allowed or tag_hit:
+            matched += 1
+            hits.append(f"文本信号:{signal}")
+        else:
+            misses.append(f"缺少文本信号:{signal}")
+            penalty += 0.05
+
+    for quality in plan.unresolved_conditions.get("quality", []):
+        if quality == "exclude_dark":
+            dark_hit = any(word in f"{tag_text} {filename}" for word in ["dark", "night", "low_light", "underexposed", "太暗"])
+            if dark_hit:
+                misses.append("排除太暗")
+                penalty += 0.1
+            else:
+                hits.append("未命中太暗排除项")
+        elif quality in {"clear", "clear_subject"}:
+            expected += 1
+            if any(word in tag_text for word in ["clear", "sharp", "portrait", "person", "people", "subject"]):
+                matched += 1
+                hits.append(f"质量:{quality}")
+
+    negative_terms = []
+    for values in plan.negative_conditions.values():
+        negative_terms.extend(values)
+    for term in unique_text(str(item).lower() for item in negative_terms if str(item).strip()):
+        if term and (term in tag_text or term in filename or term in text_blob):
+            misses.append(f"排除:{term}")
+            penalty += 0.14
+
+    if asset.kind == "document" and not wants_document_results(plan):
+        misses.append("非文档查询降低文档权重")
+        penalty += 0.18
+    if asset.kind != "document" and wants_document_results(plan):
+        misses.append("文档查询降低非文档权重")
+        penalty += 0.12
+
+    if not expected:
+        score = 0.0
+    else:
+        score = matched / expected
+    return max(0.0, min(score, 1.0)), hits[:8], min(penalty, 0.45), misses[:8]
+
+
+def wants_document_results(plan: QueryPlan) -> bool:
+    if plan.executable_filters.get("kind") == "document":
+        return True
+    return "document" in plan.unresolved_conditions.get("media", []) or "document" in plan.unresolved_conditions.get("text_signals", [])
+
+
 def weighted_search_score(
     profile: str,
     clip_score: float,
@@ -1758,6 +1867,8 @@ def explain_search_match(
     tag_hits: list[str],
     ocr_hits: list[str],
     metadata_hits: list[str],
+    constraint_hits: list[str],
+    constraint_misses: list[str],
     relation_hits: list[str],
     filename_score: float,
     best_prompt: str,
@@ -1777,6 +1888,10 @@ def explain_search_match(
         reasons.append(f"文本信号命中：{'、'.join(ocr_hits[:5])}")
     if metadata_hits:
         reasons.append(f"元数据条件命中：{'、'.join(metadata_hits[:5])}")
+    if constraint_hits:
+        reasons.append(f"结构化条件命中：{'、'.join(constraint_hits[:4])}")
+    if constraint_misses:
+        reasons.append(f"结构化条件降权：{'、'.join(constraint_misses[:3])}")
     if filename_score >= 0.5:
         reasons.append("文件名与查询关键词匹配")
     return reasons[:4] or ["主要依据 CLIP 跨模态语义相似度排序"]
