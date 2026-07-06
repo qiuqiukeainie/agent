@@ -355,7 +355,11 @@ class VectorEngine:
                 relation_score=relation_score,
             )
             if profile == "agent_v3":
+                interaction_boost, interaction_hits = interaction_prompt_boost(plan, best_prompt)
+                if interaction_hits:
+                    constraint_hits = [*constraint_hits, *interaction_hits]
                 score = score + 0.12 * constraint_score - constraint_penalty
+                score = score + interaction_boost
 
             rows.append(
                 {
@@ -430,8 +434,10 @@ class VectorEngine:
                     continue
                 best = scores.get(index)
                 tag_prompt = f"tag:{term}"
-                tag_recall_score = 0.18 if plan.unresolved_conditions.get("relations") else 0.32
-                if best is None or tag_recall_score > best[0]:
+                tag_recall_score = 0.16 if plan.unresolved_conditions.get("relations") else 0.22
+                if best is None:
+                    scores[index] = (tag_recall_score, tag_prompt)
+                elif best[1].startswith("tag:") and tag_recall_score > best[0]:
                     scores[index] = (tag_recall_score, tag_prompt)
 
         if not scores:
@@ -1479,6 +1485,17 @@ def constraint_match(
                 matched += 1
                 hits.append(f"质量:{quality}")
 
+    object_terms = plan.unresolved_conditions.get("objects", [])
+    object_alias_hits = 0
+    for obj in object_terms:
+        aliases = tag_aliases_for_query_term(obj)
+        if aliases and any(alias in tag_text for alias in aliases):
+            object_alias_hits += 1
+            hits.append(f"物体:{obj}")
+    if object_terms:
+        expected += min(len(object_terms), 3)
+        matched += min(object_alias_hits, 3)
+
     negative_terms = []
     for values in plan.negative_conditions.values():
         negative_terms.extend(values)
@@ -1505,6 +1522,24 @@ def wants_document_results(plan: QueryPlan) -> bool:
     if plan.executable_filters.get("kind") == "document":
         return True
     return "document" in plan.unresolved_conditions.get("media", []) or "document" in plan.unresolved_conditions.get("text_signals", [])
+
+
+def interaction_prompt_boost(plan: QueryPlan, best_prompt: str) -> tuple[float, list[str]]:
+    prompt = (best_prompt or "").lower()
+    actions = set(plan.unresolved_conditions.get("actions", []))
+    objects = set(plan.unresolved_conditions.get("objects", []))
+    wants_phone = bool(objects & {"手机", "电话", "智能手机"})
+    if not wants_phone:
+        return 0.0, []
+    if actions & {"打电话", "通话", "接电话"}:
+        if any(phrase in prompt for phrase in ["talking on the phone", "phone call", "making a phone call", "calling"]):
+            return 0.065, ["动作提示:打电话"]
+        if any(phrase in prompt for phrase in ["holding a mobile phone", "using a smartphone", "mobile phone"]):
+            return 0.025, ["物体提示:手机"]
+    if actions & {"拿着", "手持", "举着"}:
+        if "holding" in prompt and any(phone in prompt for phone in ["phone", "smartphone"]):
+            return 0.055, ["动作提示:手持手机"]
+    return 0.0, []
 
 
 def weighted_search_score(
@@ -1672,10 +1707,45 @@ def tag_match(plan: QueryPlan, tags: list[str]) -> tuple[float, list[str]]:
         return 0.0, []
     query_tokens = query_terms(plan)
     tag_set = {tag.lower() for tag in tags}
-    hits = sorted(tag for tag in tag_set if tag in query_tokens)
+    alias_terms = set()
+    for values in plan.unresolved_conditions.values():
+        for value in values:
+            alias_terms.update(tag_aliases_for_query_term(str(value)))
+    searchable_tags = set()
+    for tag in tag_set:
+        searchable_tags.add(tag)
+        searchable_tags.add(tag.replace(" ", "_"))
+        searchable_tags.add(tag.replace(" ", "-"))
+    hits = sorted(tag for tag in tag_set if tag in query_tokens or tag in alias_terms)
+    alias_variants = set()
+    for alias in alias_terms:
+        alias_variants.add(alias)
+        alias_variants.add(alias.replace(" ", "_"))
+        alias_variants.add(alias.replace(" ", "-"))
+    hits.extend(sorted(tag for tag in tag_set if tag in alias_variants and tag not in hits))
     if not hits:
         return 0.0, []
-    return min(len(hits) / max(len(query_tokens), 1), 1.0), hits
+    denominator = max(min(len(query_tokens), 8), 1)
+    return min(len(hits) / denominator, 1.0), hits[:8]
+
+
+def tag_aliases_for_query_term(term: str) -> set[str]:
+    normalized = str(term or "").strip().lower()
+    aliases = {
+        "手机": {"cell phone", "mobile phone", "smartphone", "phone", "cell_phone", "mobile_phone"},
+        "智能手机": {"cell phone", "mobile phone", "smartphone", "phone"},
+        "电话": {"cell phone", "mobile phone", "smartphone", "phone", "telephone"},
+        "人": {"person", "people", "man", "woman"},
+        "男人": {"person", "man"},
+        "女人": {"person", "woman"},
+        "电脑": {"computer", "laptop", "laptop computer"},
+        "笔记本电脑": {"laptop", "laptop computer"},
+        "车": {"car", "vehicle", "bus", "truck"},
+        "汽车": {"car", "vehicle"},
+        "猫": {"cat"},
+        "狗": {"dog"},
+    }
+    return aliases.get(normalized, {normalized} if re.fullmatch(r"[a-z][a-z0-9 _-]+", normalized) else set())
 
 
 def ocr_match(plan: QueryPlan, text: str) -> tuple[float, list[str]]:
