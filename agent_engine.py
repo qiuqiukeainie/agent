@@ -122,6 +122,10 @@ OBJECT_WORDS = [
     "\u5e73\u677f",
     "\u7535\u8111",
     "\u7b14\u8bb0\u672c\u7535\u8111",
+    "\u4e66",
+    "\u676f\u5b50",
+    "\u7897",
+    "\u9910\u684c",
 ]
 
 EN_LOCATION_PROMPTS = {
@@ -221,6 +225,10 @@ EN_OBJECT_PROMPTS = {
     "\u5e73\u677f": ["tablet computer"],
     "\u7535\u8111": ["computer", "laptop"],
     "\u7b14\u8bb0\u672c\u7535\u8111": ["laptop computer"],
+    "\u4e66": ["book"],
+    "\u676f\u5b50": ["cup"],
+    "\u7897": ["bowl"],
+    "\u9910\u684c": ["dining table", "table"],
 }
 
 COLOR_WORDS = {
@@ -259,6 +267,123 @@ ACTION_WORDS = {
     "\u73a9\u624b\u673a": ["using a phone"],
     "\u62cd\u7167": ["taking a photo"],
     "\u6444\u5f71": ["taking a photo"],
+    "\u559d": ["drinking"],
+    "\u9605\u8bfb": ["reading"],
+    "\u8bfb\u4e66": ["reading a book"],
+    "\u6253\u7bee\u7403": ["playing basketball"],
+    "\u8e22\u8db3\u7403": ["playing football", "playing soccer"],
+}
+
+INTERACTION_ACTIONS = {
+    "\u5403": {
+        "name": "eat",
+        "actor": "person",
+        "positive": [
+            "a person eating {object}",
+            "someone eating {object}",
+            "a person taking a bite of {object}",
+        ],
+        "negative": [
+            "{object} on a table",
+            "a close-up photo of {object}",
+            "{object} without people",
+        ],
+    },
+    "\u62ff\u7740": {
+        "name": "hold",
+        "actor": "person",
+        "positive": ["a person holding {object}", "someone holding {object}"],
+        "negative": ["{object} on a table", "{object} without people"],
+    },
+    "\u624b\u6301": {
+        "name": "hold",
+        "actor": "person",
+        "positive": ["a person holding {object}", "someone holding {object}"],
+        "negative": ["{object} on a table", "{object} without people"],
+    },
+    "\u6253\u7535\u8bdd": {
+        "name": "phone_call",
+        "actor": "person",
+        "default_object": "\u624b\u673a",
+        "positive": [
+            "a person talking on the phone",
+            "a person making a phone call",
+            "a person holding a mobile phone",
+        ],
+        "negative": ["a mobile phone without people", "a person without a phone"],
+    },
+    "\u9a91": {
+        "name": "ride",
+        "actor": "person",
+        "positive": ["a person riding {object}", "someone riding {object}"],
+        "negative": ["{object} parked without people", "{object} without a rider"],
+    },
+    "\u770b\u624b\u673a": {
+        "name": "use_phone",
+        "actor": "person",
+        "default_object": "\u624b\u673a",
+        "positive": ["a person looking at a phone", "a person using a smartphone"],
+        "negative": ["a mobile phone without people", "a person without a phone"],
+    },
+    "\u73a9\u624b\u673a": {
+        "name": "use_phone",
+        "actor": "person",
+        "default_object": "\u624b\u673a",
+        "positive": ["a person using a smartphone", "a person looking at a phone"],
+        "negative": ["a mobile phone without people", "a person without a phone"],
+    },
+    "\u505a\u996d": {
+        "name": "cook",
+        "actor": "person",
+        "positive": ["a person cooking food", "someone preparing food"],
+        "negative": ["food on a table without people", "a kitchen without people"],
+    },
+    "\u70f9\u996a": {
+        "name": "cook",
+        "actor": "person",
+        "positive": ["a person cooking food", "someone preparing food"],
+        "negative": ["food on a table without people", "a kitchen without people"],
+    },
+    "\u770b": {
+        "name": "look_at",
+        "actor": "person",
+        "positive": ["a person looking at {object}", "someone watching {object}"],
+        "negative": ["{object} without people"],
+    },
+    "\u559d": {
+        "name": "drink",
+        "actor": "person",
+        "positive": ["a person drinking {object}", "someone drinking {object}"],
+        "negative": ["{object} on a table", "{object} without people"],
+    },
+    "\u9605\u8bfb": {
+        "name": "read",
+        "actor": "person",
+        "default_object": "\u4e66",
+        "positive": ["a person reading a book", "someone reading {object}"],
+        "negative": ["a book without people", "{object} on a table"],
+    },
+    "\u8bfb\u4e66": {
+        "name": "read",
+        "actor": "person",
+        "default_object": "\u4e66",
+        "positive": ["a person reading a book", "someone reading {object}"],
+        "negative": ["a book without people", "{object} on a table"],
+    },
+    "\u6253\u7bee\u7403": {
+        "name": "play_basketball",
+        "actor": "person",
+        "default_object": "\u7bee\u7403",
+        "positive": ["a person playing basketball", "someone playing with a basketball"],
+        "negative": ["a basketball without people", "a ball on the ground"],
+    },
+    "\u8e22\u8db3\u7403": {
+        "name": "play_football",
+        "actor": "person",
+        "default_object": "\u8db3\u7403",
+        "positive": ["a person playing football", "someone playing soccer"],
+        "negative": ["a football without people", "a soccer ball on the ground"],
+    },
 }
 
 SPATIAL_RELATIONS = {
@@ -315,6 +440,7 @@ class QueryPlan:
     negative_relation_queries: list[str]
     strict_conditions: dict[str, object]
     negative_conditions: dict[str, list[str]]
+    interaction_frames: list[dict[str, object]]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -350,6 +476,7 @@ class SearchAgent:
         strict_conditions = infer_strict_conditions(normalized)
         executable_filters = infer_executable_filters(normalized, now)
         semantic_queries = build_semantic_queries(normalized, unresolved)
+        interaction_frames = build_interaction_frames(unresolved)
         relation_queries = build_relation_queries(unresolved)
         negative_relation_queries = build_negative_relation_queries(unresolved)
         recall_routes = ["clip_text_image"]
@@ -391,6 +518,7 @@ class SearchAgent:
             negative_relation_queries=negative_relation_queries,
             strict_conditions=strict_conditions,
             negative_conditions=negative_conditions,
+            interaction_frames=interaction_frames,
         )
 
 
@@ -471,6 +599,36 @@ def extract_scene_words(query: str) -> list[str]:
 def extract_object_words(query: str) -> list[str]:
     found = [word for word in sorted(OBJECT_WORDS, key=len, reverse=True) if word in query]
     lowered = query.lower()
+    stable_english_objects = {
+        "mobile phone": "\u624b\u673a",
+        "cell phone": "\u624b\u673a",
+        "smartphone": "\u624b\u673a",
+        "phone": "\u7535\u8bdd",
+        "telephone": "\u7535\u8bdd",
+        "person": "\u4eba",
+        "people": "\u4eba",
+        "man": "\u7537\u4eba",
+        "woman": "\u5973\u4eba",
+        "laptop": "\u7b14\u8bb0\u672c\u7535\u8111",
+        "computer": "\u7535\u8111",
+        "pizza": "\u62ab\u8428",
+        "sandwich": "\u4e09\u660e\u6cbb",
+        "cake": "\u86cb\u7cd5",
+        "coffee": "\u5496\u5561",
+        "book": "\u4e66",
+        "cup": "\u676f\u5b50",
+        "bicycle": "\u81ea\u884c\u8f66",
+        "bike": "\u81ea\u884c\u8f66",
+        "basketball": "\u7bee\u7403",
+        "football": "\u8db3\u7403",
+        "soccer ball": "\u8db3\u7403",
+        "car": "\u8f66",
+        "cat": "\u732b",
+        "dog": "\u72d7",
+    }
+    for phrase, word in sorted(stable_english_objects.items(), key=lambda item: len(item[0]), reverse=True):
+        if phrase in lowered:
+            found.append(word)
     english_objects = {
         "mobile phone": "手机",
         "cell phone": "手机",
@@ -533,6 +691,12 @@ def extract_mapped_words(query: str, mapping: dict[str, list[str]]) -> list[str]
         "using a phone": "玩手机",
         "looking at a phone": "看手机",
         "taking a photo": "拍照",
+        "drinking": "喝",
+        "reading a book": "读书",
+        "reading": "阅读",
+        "playing basketball": "打篮球",
+        "playing football": "踢足球",
+        "playing soccer": "踢足球",
         "riding": "骑",
         "driving": "行驶",
         "eating": "吃",
@@ -713,6 +877,7 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
     locations = flatten_prompts(unresolved.get("locations", []), EN_LOCATION_PROMPTS)
     scenes = flatten_prompts(unresolved.get("scenes", []), EN_SCENE_PROMPTS)
     objects = flatten_prompts(unresolved.get("objects", []), EN_OBJECT_PROMPTS)
+    primary_objects = [item for item in objects if item not in {"person", "man", "woman", "child", "people"}] or objects
     colors = flatten_prompts(unresolved.get("colors", []), COLOR_WORDS)
     actions = flatten_prompts(unresolved.get("actions", []), ACTION_WORDS)
     times = flatten_prompts(unresolved.get("time_words", []), EN_TIME_PROMPTS)
@@ -725,24 +890,26 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
             prompts.append(f"a video of {relation_prompt}")
         prompts.append(f"a photo of {relation_prompt}")
         prompts.append(relation_prompt)
-    descriptor = " ".join(unique([*colors[:1], *actions[:1], *objects[:1]])).strip()
+    descriptor = " ".join(unique([*colors[:1], *actions[:1], *primary_objects[:1]])).strip()
     if descriptor:
         if wants_video:
             prompts.append(f"a video of {descriptor}")
         prompts.append(f"a photo of {descriptor}")
     interaction_prompts = build_interaction_prompts(objects, actions, wants_video)
     prompts.extend(interaction_prompts)
+    for frame in build_interaction_frames(unresolved):
+        prompts.extend(str(item) for item in frame.get("positive_prompts", []))
     scene_descriptor = " ".join(unique([*colors[:1], *scenes[:2]])).strip()
     if wants_video and scene_descriptor:
         prompts.append(f"a video of {scene_descriptor}")
     if scene_descriptor:
         prompts.append(f"a photo of {scene_descriptor}")
-    if objects and scenes:
-        prompts.append(f"a photo of {objects[0]} in {scenes[0]}")
-    if objects and locations:
-        prompts.append(f"a photo of {objects[0]} at {locations[0]}")
-    if objects:
-        prompts.append(f"a photo of {objects[0]}")
+    if primary_objects and scenes:
+        prompts.append(f"a photo of {primary_objects[0]} in {scenes[0]}")
+    if primary_objects and locations:
+        prompts.append(f"a photo of {primary_objects[0]} at {locations[0]}")
+    if primary_objects:
+        prompts.append(f"a photo of {primary_objects[0]}")
     if locations and scenes:
         prompts.append(f"a {scenes[0]} at {locations[0]}")
     if scenes:
@@ -750,10 +917,49 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
     if locations:
         prompts.append(f"a photo of {locations[0]}")
     if locations and scenes:
-        prompts.append(" ".join(unique([*colors[:1], *actions[:1], *objects[:2], *scenes[:2], *locations[:2], *times[:1]])))
-    if times and (scenes or objects):
-        prompts.append(f"a {times[0]} {(objects or scenes)[0]}")
+        prompts.append(" ".join(unique([*colors[:1], *actions[:1], *primary_objects[:2], *scenes[:2], *locations[:2], *times[:1]])))
+    if times and (scenes or primary_objects):
+        prompts.append(f"a {times[0]} {(primary_objects or scenes)[0]}")
     return prompts
+
+
+def build_interaction_frames(unresolved: dict[str, list[str]]) -> list[dict[str, object]]:
+    objects_zh = unresolved.get("objects", [])
+    actions_zh = unresolved.get("actions", [])
+    frames = []
+    for action in actions_zh:
+        config = INTERACTION_ACTIONS.get(action)
+        if not config:
+            continue
+        candidate_objects = [item for item in objects_zh if item not in {"\u4eba", "\u7537\u4eba", "\u5973\u4eba", "\u5b69\u5b50"}]
+        if not candidate_objects and config.get("default_object"):
+            candidate_objects = [str(config["default_object"])]
+        if not candidate_objects:
+            candidate_objects = [""]
+        for obj in candidate_objects[:3]:
+            object_prompt = first_prompt(obj, EN_OBJECT_PROMPTS) if obj else "object"
+            positive = [
+                template.format(object=object_prompt)
+                for template in config.get("positive", [])
+            ]
+            negative = [
+                template.format(object=object_prompt)
+                for template in config.get("negative", [])
+            ]
+            frames.append(
+                {
+                    "action": config["name"],
+                    "action_word": action,
+                    "actor": config.get("actor", "person"),
+                    "object": obj,
+                    "object_prompt": object_prompt,
+                    "positive_prompts": unique(positive),
+                    "negative_prompts": unique(negative),
+                    "requires_actor": True,
+                    "requires_object": bool(obj),
+                }
+            )
+    return frames
 
 
 def build_interaction_prompts(objects: list[str], actions: list[str], wants_video: bool) -> list[str]:

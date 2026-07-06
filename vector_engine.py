@@ -309,6 +309,7 @@ class VectorEngine:
         query_vectors = [self.encoder.encode_text(item) for item in plan.semantic_queries]
         relation_vectors = [self.encoder.encode_text(item) for item in plan.relation_queries]
         negative_relation_vectors = [self.encoder.encode_text(item) for item in plan.negative_relation_queries]
+        interaction_vectors = build_interaction_vectors(self.encoder, plan)
         candidates = self.recall_candidates(plan, query_vectors, max(limit * 8, 64))
         rows = []
         for asset_index, clip_score, best_prompt in candidates:
@@ -355,9 +356,16 @@ class VectorEngine:
                 relation_score=relation_score,
             )
             if profile == "agent_v3":
-                interaction_boost, interaction_hits = interaction_prompt_boost(plan, best_prompt, tags)
+                interaction_boost, interaction_hits, interaction_misses = interaction_frame_match(
+                    plan,
+                    np.array(asset.vector, dtype=np.float32),
+                    tags,
+                    interaction_vectors,
+                )
                 if interaction_hits:
                     constraint_hits = [*constraint_hits, *interaction_hits]
+                if interaction_misses:
+                    constraint_misses = [*constraint_misses, *interaction_misses]
                 score = score + 0.12 * constraint_score - constraint_penalty
                 score = score + interaction_boost
 
@@ -455,7 +463,7 @@ class VectorEngine:
             "vector_model": self.encoder.name,
             "asset_count": len(self.assets),
             "indexed_count": sum(1 for item in self.assets if item.vector_model == self.encoder.name),
-            "agent": "search-orchestrator-v4",
+            "agent": "search-orchestrator-v5",
             "vector_index": self.vector_index.backend,
             "supported_video_types": sorted(SUPPORTED_VIDEO_TYPES),
             "supported_document_types": sorted(SUPPORTED_DOCUMENT_TYPES),
@@ -468,6 +476,7 @@ class VectorEngine:
                 "metadata_filter",
                 "fusion_rerank",
                 "relation_contrast_rerank",
+                "interaction_frame_rerank",
                 "strict_condition_rerank",
                 "negative_condition_penalty",
                 "clarification_hints",
@@ -1510,7 +1519,10 @@ def constraint_match(
             misses.append(f"排除:{term}")
             penalty += 0.14
 
-    if asset.kind == "document" and not wants_document_results(plan):
+    if asset.kind == "document" and plan.interaction_frames and not wants_document_results(plan):
+        misses.append("视觉交互查询降低文档权重")
+        penalty += 0.35
+    elif asset.kind == "document" and not wants_document_results(plan):
         misses.append("非文档查询降低文档权重")
         penalty += 0.18
     if asset.kind != "document" and wants_document_results(plan):
@@ -1550,6 +1562,59 @@ def interaction_prompt_boost(plan: QueryPlan, best_prompt: str, tags: list[str])
         if "holding" in prompt and any(phone in prompt for phone in ["phone", "smartphone"]):
             return 0.055, ["动作提示:手持手机"]
     return 0.0, []
+
+
+def build_interaction_vectors(encoder: Encoder, plan: QueryPlan) -> list[dict[str, object]]:
+    rows = []
+    for frame in getattr(plan, "interaction_frames", []):
+        positive_prompts = [str(item) for item in frame.get("positive_prompts", []) if str(item).strip()]
+        negative_prompts = [str(item) for item in frame.get("negative_prompts", []) if str(item).strip()]
+        rows.append(
+            {
+                "frame": frame,
+                "positive_vectors": [encoder.encode_text(prompt) for prompt in positive_prompts],
+                "negative_vectors": [encoder.encode_text(prompt) for prompt in negative_prompts],
+            }
+        )
+    return rows
+
+
+def interaction_frame_match(
+    plan: QueryPlan,
+    image_vector: np.ndarray,
+    tags: list[str],
+    interaction_vectors: list[dict[str, object]],
+) -> tuple[float, list[str], list[str]]:
+    if not interaction_vectors:
+        return 0.0, [], []
+    tag_text = " ".join(tags).lower()
+    total_boost = 0.0
+    hits = []
+    misses = []
+    for item in interaction_vectors:
+        frame = item["frame"]
+        action = str(frame.get("action", "interaction"))
+        obj = str(frame.get("object", ""))
+        aliases = tag_aliases_for_query_term(obj)
+        has_object = not obj or any(alias in tag_text for alias in aliases)
+        has_actor = any(alias in tag_text for alias in {"person", "people", "man", "woman"})
+        positive = max((cosine_similarity(image_vector, vector) for vector in item.get("positive_vectors", [])), default=0.0)
+        negative = max((cosine_similarity(image_vector, vector) for vector in item.get("negative_vectors", [])), default=positive)
+        margin = positive - negative
+        if has_actor and has_object and margin >= -0.005:
+            boost = 0.04 + min(max((margin + 0.005) / 0.08, 0.0), 1.0) * 0.06
+            total_boost += boost
+            hits.append(f"交互:{action}:{obj or 'object'}")
+        elif frame.get("requires_object", True) and not has_object:
+            total_boost -= 0.055
+            misses.append(f"缺少交互物体:{obj}")
+        elif frame.get("requires_actor", True) and not has_actor:
+            total_boost -= 0.045
+            misses.append(f"缺少交互主体:{obj or action}")
+        elif margin < -0.02:
+            total_boost -= 0.035
+            misses.append(f"动作关系弱:{action}")
+    return max(min(total_boost, 0.16), -0.16), hits[:6], misses[:6]
 
 
 def weighted_search_score(
@@ -1741,6 +1806,32 @@ def tag_match(plan: QueryPlan, tags: list[str]) -> tuple[float, list[str]]:
 
 def tag_aliases_for_query_term(term: str) -> set[str]:
     normalized = str(term or "").strip().lower()
+    stable_aliases = {
+        "\u624b\u673a": {"cell phone", "mobile phone", "smartphone", "phone", "cell_phone", "mobile_phone"},
+        "\u667a\u80fd\u624b\u673a": {"cell phone", "mobile phone", "smartphone", "phone"},
+        "\u7535\u8bdd": {"cell phone", "mobile phone", "smartphone", "phone", "telephone"},
+        "\u4eba": {"person", "people", "man", "woman"},
+        "\u7537\u4eba": {"person", "man"},
+        "\u5973\u4eba": {"person", "woman"},
+        "\u5b69\u5b50": {"person", "child"},
+        "\u7535\u8111": {"computer", "laptop", "laptop computer"},
+        "\u7b14\u8bb0\u672c\u7535\u8111": {"laptop", "laptop computer"},
+        "\u8f66": {"car", "vehicle", "bus", "truck"},
+        "\u6c7d\u8f66": {"car", "vehicle"},
+        "\u81ea\u884c\u8f66": {"bicycle", "bike"},
+        "\u6469\u6258\u8f66": {"motorcycle"},
+        "\u732b": {"cat"},
+        "\u72d7": {"dog"},
+        "\u62ab\u8428": {"pizza"},
+        "\u4e09\u660e\u6cbb": {"sandwich"},
+        "\u86cb\u7cd5": {"cake"},
+        "\u5496\u5561": {"coffee"},
+        "\u7bee\u7403": {"basketball", "ball"},
+        "\u8db3\u7403": {"football", "soccer ball", "ball"},
+        "\u4e66": {"book"},
+    }
+    if normalized in stable_aliases:
+        return stable_aliases[normalized]
     aliases = {
         "手机": {"cell phone", "mobile phone", "smartphone", "phone", "cell_phone", "mobile_phone"},
         "智能手机": {"cell phone", "mobile phone", "smartphone", "phone"},
