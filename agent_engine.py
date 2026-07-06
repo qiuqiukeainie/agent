@@ -469,7 +469,28 @@ def extract_scene_words(query: str) -> list[str]:
 
 
 def extract_object_words(query: str) -> list[str]:
-    return unique([word for word in sorted(OBJECT_WORDS, key=len, reverse=True) if word in query])
+    found = [word for word in sorted(OBJECT_WORDS, key=len, reverse=True) if word in query]
+    lowered = query.lower()
+    english_objects = {
+        "mobile phone": "手机",
+        "cell phone": "手机",
+        "smartphone": "手机",
+        "phone": "电话",
+        "telephone": "电话",
+        "person": "人",
+        "people": "人",
+        "man": "男人",
+        "woman": "女人",
+        "laptop": "笔记本电脑",
+        "computer": "电脑",
+        "car": "车",
+        "cat": "猫",
+        "dog": "狗",
+    }
+    for phrase, word in sorted(english_objects.items(), key=lambda item: len(item[0]), reverse=True):
+        if phrase in lowered:
+            found.append(word)
+    return unique(found)
 
 
 def extract_spatial_relations(query: str) -> list[str]:
@@ -499,15 +520,43 @@ def extract_relation_entities(query: str) -> list[tuple[str, str]]:
 
 
 def extract_mapped_words(query: str, mapping: dict[str, list[str]]) -> list[str]:
-    return unique([word for word in sorted(mapping, key=len, reverse=True) if word in query])
+    found = [word for word in sorted(mapping, key=len, reverse=True) if word in query]
+    lowered = query.lower()
+    english_actions = {
+        "holding": "拿着",
+        "hold": "拿着",
+        "talking on the phone": "打电话",
+        "making a phone call": "打电话",
+        "phone call": "打电话",
+        "calling": "打电话",
+        "using a smartphone": "玩手机",
+        "using a phone": "玩手机",
+        "looking at a phone": "看手机",
+        "taking a photo": "拍照",
+        "riding": "骑",
+        "driving": "行驶",
+        "eating": "吃",
+        "cooking": "做饭",
+        "walking": "走",
+        "running": "跑",
+    }
+    for phrase, word in sorted(english_actions.items(), key=lambda item: len(item[0]), reverse=True):
+        if phrase in lowered:
+            found.append(word)
+    return unique(found)
 
 
 def extract_media_words(query: str) -> list[str]:
     media = []
+    lowered = query.lower()
     if any(word in query for word in ["\u77ed\u89c6\u9891", "\u89c6\u9891", "\u7247\u6bb5"]):
         media.append("video")
     if any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u76f8\u7247"]):
         media.append("image")
+    if any(word in lowered for word in ["photo", "picture", "image"]):
+        media.append("image")
+    if any(word in lowered for word in ["video", "clip", "footage"]):
+        media.append("video")
     if any(word in query.lower() for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md"]):
         media.append("document")
     return media
@@ -639,11 +688,12 @@ def infer_executable_filters(query: str, now: datetime) -> dict[str, str | int |
             break
 
     media_kind = None
-    if any(word in query for word in ["\u77ed\u89c6\u9891", "\u89c6\u9891", "\u7247\u6bb5"]):
+    lowered = query.lower()
+    if any(word in query for word in ["\u77ed\u89c6\u9891", "\u89c6\u9891", "\u7247\u6bb5"]) or any(word in lowered for word in ["video", "clip", "footage"]):
         media_kind = "video"
-    elif any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u5408\u5f71", "\u76f8\u7247"]):
+    elif any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u5408\u5f71", "\u76f8\u7247"]) or any(word in lowered for word in ["photo", "picture", "image"]):
         media_kind = "image"
-    elif any(word in query.lower() for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md"]):
+    elif any(word in lowered for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md", "document"]):
         media_kind = "document"
 
     return {"year": year, "season": season, "kind": media_kind}

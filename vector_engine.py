@@ -355,7 +355,7 @@ class VectorEngine:
                 relation_score=relation_score,
             )
             if profile == "agent_v3":
-                interaction_boost, interaction_hits = interaction_prompt_boost(plan, best_prompt)
+                interaction_boost, interaction_hits = interaction_prompt_boost(plan, best_prompt, tags)
                 if interaction_hits:
                     constraint_hits = [*constraint_hits, *interaction_hits]
                 score = score + 0.12 * constraint_score - constraint_penalty
@@ -1487,14 +1487,20 @@ def constraint_match(
 
     object_terms = plan.unresolved_conditions.get("objects", [])
     object_alias_hits = 0
+    missing_important_objects = []
     for obj in object_terms:
         aliases = tag_aliases_for_query_term(obj)
         if aliases and any(alias in tag_text for alias in aliases):
             object_alias_hits += 1
             hits.append(f"物体:{obj}")
+        elif obj in {"手机", "电话", "智能手机"}:
+            missing_important_objects.append(obj)
     if object_terms:
         expected += min(len(object_terms), 3)
         matched += min(object_alias_hits, 3)
+    if missing_important_objects:
+        misses.append(f"缺少关键物体:{'、'.join(unique_text(missing_important_objects))}")
+        penalty += 0.08
 
     negative_terms = []
     for values in plan.negative_conditions.values():
@@ -1524,12 +1530,16 @@ def wants_document_results(plan: QueryPlan) -> bool:
     return "document" in plan.unresolved_conditions.get("media", []) or "document" in plan.unresolved_conditions.get("text_signals", [])
 
 
-def interaction_prompt_boost(plan: QueryPlan, best_prompt: str) -> tuple[float, list[str]]:
+def interaction_prompt_boost(plan: QueryPlan, best_prompt: str, tags: list[str]) -> tuple[float, list[str]]:
     prompt = (best_prompt or "").lower()
+    tag_text = " ".join(tags).lower()
     actions = set(plan.unresolved_conditions.get("actions", []))
     objects = set(plan.unresolved_conditions.get("objects", []))
     wants_phone = bool(objects & {"手机", "电话", "智能手机"})
     if not wants_phone:
+        return 0.0, []
+    phone_aliases = tag_aliases_for_query_term("手机") | tag_aliases_for_query_term("电话")
+    if not any(alias in tag_text for alias in phone_aliases):
         return 0.0, []
     if actions & {"打电话", "通话", "接电话"}:
         if any(phrase in prompt for phrase in ["talking on the phone", "phone call", "making a phone call", "calling"]):
