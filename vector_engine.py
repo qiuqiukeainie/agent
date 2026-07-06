@@ -1829,6 +1829,11 @@ def tag_aliases_for_query_term(term: str) -> set[str]:
         "\u7bee\u7403": {"basketball", "ball"},
         "\u8db3\u7403": {"football", "soccer ball", "ball"},
         "\u4e66": {"book"},
+        "\u98df\u7269": {"food", "meal", "pizza", "sandwich", "cake", "fruit"},
+        "\u996e\u6599": {"drink", "beverage", "cup", "coffee"},
+        "\u676f\u5b50": {"cup"},
+        "\u7897": {"bowl"},
+        "\u9910\u684c": {"dining table", "table"},
     }
     if normalized in stable_aliases:
         return stable_aliases[normalized]

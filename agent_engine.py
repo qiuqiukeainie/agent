@@ -126,6 +126,8 @@ OBJECT_WORDS = [
     "\u676f\u5b50",
     "\u7897",
     "\u9910\u684c",
+    "\u98df\u7269",
+    "\u996e\u6599",
 ]
 
 EN_LOCATION_PROMPTS = {
@@ -229,6 +231,8 @@ EN_OBJECT_PROMPTS = {
     "\u676f\u5b50": ["cup"],
     "\u7897": ["bowl"],
     "\u9910\u684c": ["dining table", "table"],
+    "\u98df\u7269": ["food", "meal"],
+    "\u996e\u6599": ["drink", "beverage"],
 }
 
 COLOR_WORDS = {
@@ -278,6 +282,7 @@ INTERACTION_ACTIONS = {
     "\u5403": {
         "name": "eat",
         "actor": "person",
+        "default_object": "\u98df\u7269",
         "positive": [
             "a person eating {object}",
             "someone eating {object}",
@@ -353,6 +358,7 @@ INTERACTION_ACTIONS = {
     "\u559d": {
         "name": "drink",
         "actor": "person",
+        "default_object": "\u996e\u6599",
         "positive": ["a person drinking {object}", "someone drinking {object}"],
         "negative": ["{object} on a table", "{object} without people"],
     },
@@ -615,8 +621,14 @@ def extract_object_words(query: str) -> list[str]:
         "sandwich": "\u4e09\u660e\u6cbb",
         "cake": "\u86cb\u7cd5",
         "coffee": "\u5496\u5561",
+        "food": "\u98df\u7269",
+        "meal": "\u98df\u7269",
+        "drink": "\u996e\u6599",
+        "beverage": "\u996e\u6599",
         "book": "\u4e66",
         "cup": "\u676f\u5b50",
+        "table": "\u9910\u684c",
+        "dining table": "\u9910\u684c",
         "bicycle": "\u81ea\u884c\u8f66",
         "bike": "\u81ea\u884c\u8f66",
         "basketball": "\u7bee\u7403",
@@ -648,7 +660,7 @@ def extract_object_words(query: str) -> list[str]:
     for phrase, word in sorted(english_objects.items(), key=lambda item: len(item[0]), reverse=True):
         if phrase in lowered:
             found.append(word)
-    return unique(found)
+    return filter_nested_terms(unique(found))
 
 
 def extract_spatial_relations(query: str) -> list[str]:
@@ -679,35 +691,80 @@ def extract_relation_entities(query: str) -> list[tuple[str, str]]:
 
 def extract_mapped_words(query: str, mapping: dict[str, list[str]]) -> list[str]:
     found = [word for word in sorted(mapping, key=len, reverse=True) if word in query]
+    if mapping is ACTION_WORDS:
+        found.extend(extract_english_action_words(query))
+    return unique(found)
+
+
+def extract_english_action_words(query: str) -> list[str]:
     lowered = query.lower()
-    english_actions = {
-        "holding": "拿着",
-        "hold": "拿着",
+    phrase_actions = {
         "talking on the phone": "打电话",
         "making a phone call": "打电话",
         "phone call": "打电话",
-        "calling": "打电话",
         "using a smartphone": "玩手机",
         "using a phone": "玩手机",
         "looking at a phone": "看手机",
         "taking a photo": "拍照",
-        "drinking": "喝",
         "reading a book": "读书",
-        "reading": "阅读",
         "playing basketball": "打篮球",
         "playing football": "踢足球",
         "playing soccer": "踢足球",
-        "riding": "骑",
-        "driving": "行驶",
-        "eating": "吃",
-        "cooking": "做饭",
-        "walking": "走",
-        "running": "跑",
     }
-    for phrase, word in sorted(english_actions.items(), key=lambda item: len(item[0]), reverse=True):
+    found = []
+    for phrase, word in sorted(phrase_actions.items(), key=lambda item: len(item[0]), reverse=True):
         if phrase in lowered:
             found.append(word)
+    word_actions = {
+        "eat": "吃",
+        "eats": "吃",
+        "eating": "吃",
+        "ate": "吃",
+        "drink": "喝",
+        "drinks": "喝",
+        "drinking": "喝",
+        "drank": "喝",
+        "hold": "拿着",
+        "holds": "拿着",
+        "holding": "拿着",
+        "ride": "骑",
+        "rides": "骑",
+        "riding": "骑",
+        "drive": "行驶",
+        "drives": "行驶",
+        "driving": "行驶",
+        "cook": "做饭",
+        "cooks": "做饭",
+        "cooking": "做饭",
+        "read": "阅读",
+        "reads": "阅读",
+        "reading": "阅读",
+        "call": "打电话",
+        "calls": "打电话",
+        "calling": "打电话",
+        "walk": "走",
+        "walks": "走",
+        "walking": "走",
+        "run": "跑",
+        "runs": "跑",
+        "running": "跑",
+        "play": "运动",
+        "plays": "运动",
+        "playing": "运动",
+    }
+    for token in re.findall(r"[a-z]+", lowered):
+        if token in word_actions:
+            found.append(word_actions[token])
     return unique(found)
+
+
+def filter_nested_terms(values: list[str]) -> list[str]:
+    result = []
+    for value in sorted(values, key=len, reverse=True):
+        if any(value != other and value in other for other in result):
+            continue
+        result.append(value)
+    return list(reversed(result))
 
 
 def extract_media_words(query: str) -> list[str]:
