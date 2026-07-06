@@ -116,6 +116,12 @@ OBJECT_WORDS = [
     "\u6c34\u679c",
     "\u65b9\u5757",
     "\u7403",
+    "\u624b\u673a",
+    "\u7535\u8bdd",
+    "\u667a\u80fd\u624b\u673a",
+    "\u5e73\u677f",
+    "\u7535\u8111",
+    "\u7b14\u8bb0\u672c\u7535\u8111",
 ]
 
 EN_LOCATION_PROMPTS = {
@@ -209,6 +215,12 @@ EN_OBJECT_PROMPTS = {
     "\u7403": ["ball"],
     "\u5496\u5561": ["coffee"],
     "\u6c34\u679c": ["fruit"],
+    "\u624b\u673a": ["mobile phone", "cell phone", "smartphone"],
+    "\u667a\u80fd\u624b\u673a": ["smartphone", "mobile phone"],
+    "\u7535\u8bdd": ["phone", "telephone"],
+    "\u5e73\u677f": ["tablet computer"],
+    "\u7535\u8111": ["computer", "laptop"],
+    "\u7b14\u8bb0\u672c\u7535\u8111": ["laptop computer"],
 }
 
 COLOR_WORDS = {
@@ -237,6 +249,16 @@ ACTION_WORDS = {
     "\u70f9\u996a": ["cooking"],
     "\u8d70": ["walking"],
     "\u8df3\u821e": ["dancing"],
+    "\u62ff\u7740": ["holding"],
+    "\u624b\u6301": ["holding"],
+    "\u4e3e\u7740": ["holding"],
+    "\u6253\u7535\u8bdd": ["talking on the phone", "calling"],
+    "\u901a\u8bdd": ["talking on the phone", "phone call"],
+    "\u63a5\u7535\u8bdd": ["answering a phone call"],
+    "\u770b\u624b\u673a": ["looking at a phone"],
+    "\u73a9\u624b\u673a": ["using a phone"],
+    "\u62cd\u7167": ["taking a photo"],
+    "\u6444\u5f71": ["taking a photo"],
 }
 
 SPATIAL_RELATIONS = {
@@ -658,6 +680,8 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
         if wants_video:
             prompts.append(f"a video of {descriptor}")
         prompts.append(f"a photo of {descriptor}")
+    interaction_prompts = build_interaction_prompts(objects, actions, wants_video)
+    prompts.extend(interaction_prompts)
     scene_descriptor = " ".join(unique([*colors[:1], *scenes[:2]])).strip()
     if wants_video and scene_descriptor:
         prompts.append(f"a video of {scene_descriptor}")
@@ -680,6 +704,30 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
     if times and (scenes or objects):
         prompts.append(f"a {times[0]} {(objects or scenes)[0]}")
     return prompts
+
+
+def build_interaction_prompts(objects: list[str], actions: list[str], wants_video: bool) -> list[str]:
+    prompts = []
+    object_set = set(objects)
+    action_set = set(actions)
+    phone_objects = {"mobile phone", "cell phone", "smartphone", "phone", "telephone"}
+    holding_actions = {"holding"}
+    calling_actions = {"talking on the phone", "calling", "phone call", "answering a phone call"}
+    if object_set & phone_objects and action_set & (holding_actions | calling_actions):
+        base_prompts = [
+            "a person holding a mobile phone",
+            "a person talking on the phone",
+            "a person making a phone call",
+            "a person using a smartphone",
+        ]
+        for prompt in base_prompts:
+            if wants_video:
+                prompts.append(prompt.replace("a person", "a video of a person", 1))
+            prompts.append(prompt.replace("a person", "a photo of a person", 1))
+    if {"computer", "laptop", "laptop computer"} & object_set:
+        if {"using", "looking", "working"} & action_set:
+            prompts.append("a person using a laptop computer")
+    return unique(prompts)
 
 
 def build_relation_queries(unresolved: dict[str, list[str]]) -> list[str]:
