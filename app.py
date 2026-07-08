@@ -26,6 +26,7 @@ from vector_engine import (
     VectorEngine,
     cosine_similarity,
 )
+from chat_engine import session_store, route_chat
 
 
 ROOT = Path(__file__).parent.resolve()
@@ -114,6 +115,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             limit = parse_positive_int(params.get("limit", ["36"])[0], default=36, minimum=1, maximum=80)
             library = params.get("library", ["all"])[0]
             return self.send_json(ENGINE.agent_search(query, limit=limit, library=library))
+        if parsed.path == "/api/chat/sessions":
+            return self.send_json({"sessions": session_store.list_sessions()})
         if parsed.path.startswith("/uploads/"):
             filename = Path(parsed.path).name
             return self.serve_file(UPLOAD_DIR / filename)
@@ -271,6 +274,24 @@ class AppHandler(SimpleHTTPRequestHandler):
             payload = self.read_json_body()
             task = submit_processing_task(payload)
             return self.send_json({"ok": True, "task": task})
+        if parsed.path == "/api/chat":
+            payload = self.read_json_body()
+            try:
+                result = route_chat(
+                    query=str(payload.get("query", "")),
+                    session_id=payload.get("session_id") or None,
+                    library=str(payload.get("library", "all")),
+                    engine=ENGINE,
+                )
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(result)
+        if parsed.path == "/api/chat/clear":
+            payload = self.read_json_body()
+            sid = str(payload.get("session_id", ""))
+            if sid:
+                session_store.delete_session(sid)
+            return self.send_json({"ok": True})
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def handle_upload(self) -> None:

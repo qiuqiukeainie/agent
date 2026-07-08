@@ -930,6 +930,123 @@ aside,
   padding: 4px 0;
 }
 
+/* ── Chat panel ───────────────────────────────────────────── */
+
+.chat-panel {
+  margin: 16px 0;
+  border: 1px solid #d0d9d5;
+  border-radius: 8px;
+  background: #fafcfb;
+  overflow: hidden;
+}
+
+.chat-panel[hidden] {
+  display: none;
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  border-bottom: 1px solid #dce5e1;
+  background: #f4f8f6;
+}
+
+.chat-head .panel-title {
+  margin: 0;
+  font-size: 14px;
+  color: #1d6f62;
+}
+
+.btn-text {
+  background: none;
+  border: none;
+  color: #6b7d76;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.btn-text:hover {
+  background: #e0ece7;
+  color: #1d6f62;
+}
+
+.chat-messages {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-bubble {
+  max-width: 88%;
+  padding: 8px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  animation: chatIn 0.2s ease-out;
+}
+
+@keyframes chatIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-bubble.user {
+  align-self: flex-end;
+  background: #d2e8f0;
+  color: #1a2a33;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-bubble.agent {
+  align-self: flex-start;
+  background: #e2f0e8;
+  color: #1a352a;
+  border-bottom-left-radius: 4px;
+}
+
+.chat-bubble .bubble-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+  opacity: 0.7;
+}
+
+.chat-bubble .bubble-meta {
+  font-size: 12px;
+  color: #5a7068;
+  margin-top: 4px;
+}
+
+.clarification-hint {
+  margin: 0 16px 12px;
+  padding: 8px 14px;
+  background: #fff8e5;
+  border: 1px solid #f0d060;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #6d5800;
+  cursor: pointer;
+}
+
+.clarification-hint:hover {
+  background: #fff3cc;
+}
+
+.clarification-hint[hidden] {
+  display: none;
+}
+
+/* ── Asset dialog ────────────────────────────────────────── */
+
 .asset-dialog {
   width: min(980px, calc(100vw - 36px));
   max-height: calc(100vh - 36px);

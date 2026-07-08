@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Iterable
@@ -272,6 +276,13 @@ EN_TIME_PROMPTS = {
     "\u591c\u665a": ["night"],
 }
 
+# \u2500\u2500 LLM Agent configuration \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+LLM_API_BASE = os.environ.get("LLM_API_BASE", "http://localhost:11434/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:7b")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "not-needed")
+LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "15"))
+AGENT_MODE = os.environ.get("AGENT_MODE", "hybrid")  # llm | rule | hybrid
+
 
 @dataclass
 class QueryPlan:
@@ -296,6 +307,91 @@ class QueryPlan:
         return asdict(self)
 
 
+# ── Conversation helpers ─────────────────────────────────────────────────
+
+REFINEMENT_PATTERNS = [
+    r"只要(.+)",
+    r"只看(.+)",
+    r"仅(.+)",
+    r"不要(.+)",
+    r"去掉(.+)",
+    r"换成(.+)",
+    r"改成(.+)",
+    r"缩小(.+)",
+    r"过滤(.+)",
+    r"只要.?视频",
+    r"只要.?图片",
+    r"室内的",
+    r"室外的",
+    r"白天的",
+    r"晚上的",
+]
+
+
+def is_refinement_query(query: str) -> bool:
+    """Check if query is refining a previous search rather than starting fresh."""
+    # Only flag as refinement if the query STARTS with a refinement word
+    # or consists mainly of a single filter/concept
+    refinement_starters = [
+        "只要", "只看", "不要", "去掉", "换成", "改成",
+        "缩小", "过滤", "仅",
+    ]
+    if any(query.startswith(w) for w in refinement_starters):
+        return True
+    # Short standalone refinements
+    standalone_refinements = ["室内", "室外", "白天", "晚上"]
+    if query.strip() in standalone_refinements:
+        return True
+    # "只要视频" / "只要图片" pattern even without prefix
+    if query.strip() in {"视频", "图片", "照片"} and len(query.strip()) <= 2:
+        return True
+    return False
+
+
+def merge_with_history(
+    query: str,
+    chat_history: list[dict] | None,
+) -> str:
+    """Merge current query with conversation history context.
+
+    If the query is a refinement, prepend the previous search intent.
+    Returns the enriched query string.
+    """
+    if not chat_history:
+        return query
+
+    # Get the most recent user query from history
+    prev_user_queries = [
+        msg["content"]
+        for msg in chat_history
+        if msg.get("role") == "user"
+    ]
+    if not prev_user_queries:
+        return query
+
+    last_query = prev_user_queries[-1]
+
+    # If current query looks like a refinement, merge
+    if is_refinement_query(query):
+        # Handle negation patterns: "不要X" → enrich previous query with exclusion
+        if any(query.startswith(w) for w in ["不要", "去掉"]):
+            return f"{last_query}（排除{query[2:]}）"
+        # Handle replacement: "换成X"
+        if any(query.startswith(w) for w in ["换成", "改成"]):
+            return query[2:]  # Replace entirely with new target
+        # Handle refinement: "只要X", "室内", etc.
+        return f"{last_query} {query}"
+
+    # If current query is very short (1-3 chars), it's likely a follow-up answer
+    if len(query) <= 3:
+        return f"{last_query} {query}"
+
+    return query
+
+
+# ── Agent classes ─────────────────────────────────────────────────────────
+
+
 class SearchAgent:
     """Agent planner owned by role A.
 
@@ -305,9 +401,15 @@ class SearchAgent:
     face/person index.
     """
 
-    def build_plan(self, query: str, now: datetime | None = None) -> QueryPlan:
+    def build_plan(
+        self,
+        query: str,
+        now: datetime | None = None,
+        chat_history: list[dict] | None = None,
+    ) -> QueryPlan:
         now = now or datetime.now()
-        normalized = " ".join(query.strip().split())
+        merged_query = merge_with_history(query, chat_history)
+        normalized = " ".join(merged_query.strip().split())
         unresolved = {
             "people": extract_people(normalized),
             "locations": extract_location_words(normalized),
@@ -835,3 +937,356 @@ def unique(values: Iterable[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+# ── LLM Agent ────────────────────────────────────────────────────────────
+
+LLM_SYSTEM_PROMPT = """You are a query understanding agent for a multi-modal asset retrieval system.
+The system stores images and videos with CLIP embeddings, tags, OCR text, and face clusters.
+
+Your job: parse a Chinese natural language query and output structured JSON that the search engine can execute.
+
+## Output JSON Schema
+{
+  "intent": "asset_search",
+  "concepts": {
+    "people": ["person names mentioned, e.g. 小明"],
+    "locations": ["places, e.g. 海边, 学校, 办公室"],
+    "scenes": ["scene types, e.g. 合影, 自拍, 夜景, 演讲, 会议"],
+    "objects": ["physical objects, e.g. 狗, 汽车, 蛋糕"],
+    "actions": ["activities, e.g. 跑步, 做饭, 跳舞"],
+    "colors": ["colors mentioned, e.g. 红, 蓝"],
+    "time_words": ["time expressions, e.g. 去年, 夏天, 2024"],
+    "media": ["video or image if specified"],
+    "relations": ["spatial relations between two entities, format: 'entity1 relation entity2', e.g. '猫 on 车'"]
+  },
+  "english_prompts": ["3-5 good CLIP search prompts in English"],
+  "filters": {"kind": "image|video|null", "year": null, "season": "春天|夏天|秋天|冬天|null"},
+  "clarification_needed": false,
+  "clarification_question": ""
+}
+
+## Rules
+- Extract ALL concepts mentioned in the query. Leave empty arrays for absent categories.
+- Generate diverse English prompts: include "a photo of ..." and "a video of ..." variants as appropriate.
+- Detect spatial relations like "X在Y上面" → "X on Y", "X左边" → "X left_of Y", "X里" → "X inside Y".
+- For time words like "去年" → set filters.year to last year (current year - 1). "今年" → current year.
+- "夏天"/"春天" etc → set filters.season accordingly.
+- If the query is too vague (e.g. just "找照片"), set clarification_needed=true.
+- Infer kind=video when user mentions 视频/短片/片段, kind=image for 照片/图片/图像/合影.
+
+## Few-shot Examples
+
+Query: "去年夏天在海边拍的合影"
+Output: {"intent":"asset_search","concepts":{"people":[],"locations":["海边"],"scenes":["合影"],"objects":[],"actions":[],"colors":[],"time_words":["去年","夏天"],"media":["image"],"relations":[]},"english_prompts":["a photo of group photo at beach","summer beach group photo","people posing at seaside"],"filters":{"kind":"image","year":2025,"season":"夏天"},"clarification_needed":false,"clarification_question":""}
+
+Query: "猫在车上"
+Output: {"intent":"asset_search","concepts":{"people":[],"locations":[],"scenes":[],"objects":["猫","车"],"actions":[],"colors":[],"time_words":[],"media":[],"relations":["猫 on 车"]},"english_prompts":["a photo of a cat on a car","cat sitting on vehicle","cat on top of car"],"filters":{"kind":null,"year":null,"season":null},"clarification_needed":false,"clarification_question":""}
+
+Query: "带字幕的访谈视频"
+Output: {"intent":"asset_search","concepts":{"people":[],"locations":[],"scenes":["访谈","字幕"],"objects":[],"actions":[],"colors":[],"time_words":[],"media":["video"],"relations":[]},"english_prompts":["a video of interview with subtitles","talk show with caption text","interview screenshot with text overlay"],"filters":{"kind":"video","year":null,"season":null},"clarification_needed":false,"clarification_question":""}
+
+Query: "找照片"
+Output: {"intent":"asset_search","concepts":{"people":[],"locations":[],"scenes":[],"objects":[],"actions":[],"colors":[],"time_words":[],"media":["image"],"relations":[]},"english_prompts":["photo","image"],"filters":{"kind":"image","year":null,"season":null},"clarification_needed":true,"clarification_question":"你想找什么样的照片？可以描述场景、人物、地点或时间，比如"去年海边的合影"。"}
+"""
+
+
+class LLMAgent:
+    """LLM-powered query understanding agent.
+
+    Calls an OpenAI-compatible chat API to parse Chinese natural language
+    queries into structured concepts, then reuses the existing helper
+    functions to build a full QueryPlan.
+
+    Falls back to SearchAgent (regex rules) if the LLM is unavailable.
+    """
+
+    def __init__(self) -> None:
+        self._fallback = SearchAgent()
+
+    def build_plan(
+        self,
+        query: str,
+        now: datetime | None = None,
+        chat_history: list[dict] | None = None,
+    ) -> QueryPlan:
+        if not query or not query.strip():
+            return self._fallback.build_plan(query, now, chat_history=chat_history)
+
+        merged_query = merge_with_history(query, chat_history)
+        concepts = self._call_llm(merged_query, chat_history=chat_history)
+        if concepts is None:
+            return self._fallback.build_plan(query, now, chat_history=chat_history)
+
+        return self._build_from_concepts(merged_query, concepts, now or datetime.now())
+
+    # ── LLM call ──────────────────────────────────────────────────────
+
+    def _call_llm(self, query: str, chat_history: list[dict] | None = None) -> dict | None:
+        messages: list[dict] = [
+            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+        ]
+        # Inject conversation history as context
+        if chat_history:
+            history_text = "\n".join(
+                f"{msg['role']}: {msg['content']}" for msg in chat_history[-6:]
+            )
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Conversation history (for context — the last user message is the current query):\n"
+                    f"{history_text}\n\n"
+                    "If the current query is short or refers to previous context "
+                    "(e.g. 'indoor', 'only videos', 'cats instead'), merge it with "
+                    "the previous query intent. If it says 'only X' or 'just X', "
+                    "add X as a constraint to the previous search. "
+                    "If it asks for something completely different, treat it as a new search."
+                ),
+            })
+        messages.append({"role": "user", "content": query})
+        payload = json.dumps(
+            {
+                "model": LLM_MODEL,
+                "messages": messages,
+                "temperature": 0.1,
+                "max_tokens": 800,
+                "response_format": {"type": "json_object"},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        url = f"{LLM_API_BASE.rstrip('/')}/chat/completions"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": f"Bearer {LLM_API_KEY}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            result = json.loads(content)
+            if not isinstance(result, dict):
+                return None
+            return result
+        except Exception:
+            return None
+
+    # ── Build QueryPlan from LLM concepts ─────────────────────────────
+
+    def _build_from_concepts(
+        self, query: str, concepts: dict, now: datetime
+    ) -> QueryPlan:
+        normalized = " ".join(query.strip().split())
+        unresolved = _merge_concepts_with_regex(concepts, normalized)
+
+        executable_filters = concepts.get("filters") or {}
+        year = executable_filters.get("year")
+        season = executable_filters.get("season")
+        kind = executable_filters.get("kind")
+
+        llm_semantic = concepts.get("english_prompts") or []
+        rule_semantic = build_semantic_queries(normalized, unresolved)
+        semantic_queries = unique([*llm_semantic, *rule_semantic])
+
+        relation_queries = build_relation_queries(unresolved)
+        negative_relation_queries = build_negative_relation_queries(unresolved)
+
+        executable_filters_clean = {
+            "year": year if isinstance(year, int) else None,
+            "season": str(season) if season else None,
+            "kind": str(kind) if kind in ("image", "video") else None,
+        }
+
+        recall_routes = ["clip_text_image"]
+        if executable_filters_clean.get("kind") or executable_filters_clean.get("year") or executable_filters_clean.get("season"):
+            recall_routes.append("metadata_filter")
+        if normalized:
+            recall_routes.append("filename_keyword")
+        if has_non_empty(unresolved):
+            recall_routes.append("deferred_structured_recall")
+        recall_routes.append("tag_text_recall")
+
+        clarification_hints = build_clarification_hints(normalized, unresolved, executable_filters_clean)
+        if concepts.get("clarification_needed") and concepts.get("clarification_question"):
+            clarification_hints.insert(0, str(concepts["clarification_question"]))
+
+        return QueryPlan(
+            raw_query=normalized,
+            intent=concepts.get("intent", "asset_search"),
+            semantic_queries=semantic_queries,
+            executable_filters=executable_filters_clean,
+            unresolved_conditions={key: value for key, value in unresolved.items() if value},
+            recall_routes=recall_routes,
+            rerank_policy="0.63*clip + 0.14*tags + 0.06*metadata + 0.09*filename + 0.03*ocr + 0.05*relation",
+            downstream_requirements=build_downstream_requirements(unresolved),
+            execution_steps=build_execution_steps(normalized, unresolved, executable_filters_clean),
+            query_rewrites=semantic_queries[:6],
+            clarification_hints=clarification_hints,
+            agent_summary=build_agent_summary(normalized, unresolved, executable_filters_clean),
+            query_quality=score_query_quality(normalized, unresolved, executable_filters_clean),
+            trace=build_llm_agent_trace(
+                normalized,
+                unresolved,
+                executable_filters_clean,
+                recall_routes,
+                semantic_queries,
+                relation_queries,
+                negative_relation_queries,
+                concepts,
+            ),
+            relation_queries=relation_queries,
+            negative_relation_queries=negative_relation_queries,
+        )
+
+
+def _merge_concepts_with_regex(concepts: dict, query: str) -> dict[str, list[str]]:
+    """Merge LLM-extracted concepts with regex fallback for robustness."""
+    rule_people = extract_people(query)
+    rule_locations = extract_location_words(query)
+    rule_scenes = extract_scene_words(query)
+    rule_objects = extract_object_words(query)
+    rule_time = extract_time_words(query)
+    rule_media = extract_media_words(query)
+    rule_relations = extract_spatial_relations(query)
+
+    concept_map = concepts.get("concepts") or {} if isinstance(concepts, dict) else {}
+    return {
+        "people": unique([*as_str_list(concept_map.get("people")), *rule_people]),
+        "locations": unique([*as_str_list(concept_map.get("locations")), *rule_locations]),
+        "scenes": unique([*as_str_list(concept_map.get("scenes")), *rule_scenes]),
+        "objects": unique([*as_str_list(concept_map.get("objects")), *rule_objects]),
+        "actions": unique([*as_str_list(concept_map.get("actions")), *extract_mapped_words(query, ACTION_WORDS)]),
+        "colors": unique([*as_str_list(concept_map.get("colors")), *extract_mapped_words(query, COLOR_WORDS)]),
+        "relations": unique([*as_str_list(concept_map.get("relations")), *rule_relations]),
+        "media": unique([*as_str_list(concept_map.get("media")), *rule_media]),
+        "time_words": unique([*as_str_list(concept_map.get("time_words")), *rule_time]),
+    }
+
+
+def as_str_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str):
+        return [value]
+    return []
+
+
+def build_llm_agent_trace(
+    query: str,
+    unresolved: dict[str, list[str]],
+    executable_filters: dict[str, str | int | None],
+    recall_routes: list[str],
+    semantic_queries: list[str],
+    relation_queries: list[str],
+    negative_relation_queries: list[str],
+    llm_concepts: dict,
+) -> list[dict[str, object]]:
+    trace: list[dict[str, object]] = [
+        {
+            "stage": "agent_type",
+            "title": "Agent 类型",
+            "detail": "LLM Agent (OpenAI-compatible)",
+        },
+        {
+            "stage": "intent_parse",
+            "title": "意图解析",
+            "detail": llm_concepts.get("intent", "asset_search"),
+        },
+        {
+            "stage": "condition_split",
+            "title": "条件拆解 (LLM)",
+            "detail": {key: value for key, value in unresolved.items() if value},
+        },
+        {
+            "stage": "query_rewrite",
+            "title": "语义改写 (LLM + rule)",
+            "detail": semantic_queries[:8],
+        },
+    ]
+    if relation_queries:
+        trace.append(
+            {
+                "stage": "relation_contrast",
+                "title": "关系对比",
+                "detail": {
+                    "positive": relation_queries[:6],
+                    "negative": negative_relation_queries[:8],
+                },
+            }
+        )
+    trace.extend(
+        [
+            {
+                "stage": "route_plan",
+                "title": "召回路线",
+                "detail": recall_routes,
+            },
+            {
+                "stage": "filter_plan",
+                "title": "可执行过滤",
+                "detail": {key: value for key, value in executable_filters.items() if value},
+            },
+        ]
+    )
+    return trace
+
+
+# ── Hybrid Agent ──────────────────────────────────────────────────────────
+
+class HybridAgent:
+    """Agent that tries LLM first, falls back to rules on failure."""
+
+    def __init__(self, rule_agent: SearchAgent, llm_agent: LLMAgent) -> None:
+        self._rule = rule_agent
+        self._llm = llm_agent
+
+    def build_plan(
+        self,
+        query: str,
+        now: datetime | None = None,
+        chat_history: list[dict] | None = None,
+    ) -> QueryPlan:
+        plan = self._llm.build_plan(query, now, chat_history=chat_history)
+        trace = plan.trace
+        # Detect whether LLM succeeded by checking if trace has "LLM Agent" marker
+        llm_succeeded = any(
+            "LLM Agent" in str(item.get("detail", ""))
+            for item in trace
+            if item.get("stage") == "agent_type"
+        )
+        if llm_succeeded:
+            trace.insert(
+                0,
+                {
+                    "stage": "agent_type",
+                    "title": "Agent 类型",
+                    "detail": "Hybrid (LLM primary, rule fallback available)",
+                },
+            )
+        else:
+            trace.insert(
+                0,
+                {
+                    "stage": "agent_type",
+                    "title": "Agent 类型",
+                    "detail": "Hybrid (LLM failed, fallback to rule agent)",
+                },
+            )
+        return plan
+
+
+# ── Factory ────────────────────────────────────────────────────────────────
+
+def create_agent() -> SearchAgent | LLMAgent | HybridAgent:
+    """Create the appropriate agent based on AGENT_MODE env var."""
+    if AGENT_MODE == "rule":
+        return SearchAgent()
+    if AGENT_MODE == "llm":
+        return LLMAgent()
+    return HybridAgent(SearchAgent(), LLMAgent())

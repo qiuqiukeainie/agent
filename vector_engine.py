@@ -13,7 +13,7 @@ from typing import Iterable, Protocol
 import numpy as np
 from PIL import Image, ImageStat
 
-from agent_engine import QueryPlan, SearchAgent
+from agent_engine import QueryPlan, SearchAgent, create_agent
 from metadata_store import MetadataStore
 from vector_index import VectorIndex
 
@@ -106,7 +106,7 @@ class VectorEngine:
         self.person_merge_rules_path = self.storage_dir / "person_merge_rules.json"
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self.encoder = build_encoder()
-        self.agent = SearchAgent()
+        self.agent = create_agent()
         self.metadata = MetadataStore(self.storage_dir / "assets.db")
         self.assets: list[Asset] = []
         self.vector_index = VectorIndex()
@@ -425,11 +425,16 @@ class VectorEngine:
         return [(index, score, prompt) for index, (score, prompt) in ranked[:recall_limit]]
 
     def model_status(self) -> dict:
+        agent_type = type(self.agent).__name__
+        from agent_engine import AGENT_MODE as _agent_mode
+
         return {
             "vector_model": self.encoder.name,
             "asset_count": len(self.assets),
             "indexed_count": sum(1 for item in self.assets if item.vector_model == self.encoder.name),
             "agent": "planner-agent-v3",
+            "agent_mode": _agent_mode,
+            "agent_type": agent_type,
             "vector_index": self.vector_index.backend,
             "supported_video_types": sorted(SUPPORTED_VIDEO_TYPES),
             "supported_document_types": sorted(SUPPORTED_DOCUMENT_TYPES),

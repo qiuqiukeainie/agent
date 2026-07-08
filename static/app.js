@@ -48,6 +48,10 @@ const tagLibraryFilter = document.querySelector("#tagLibraryFilter");
 const tagFacetList = document.querySelector("#tagFacetList");
 const tagAssetList = document.querySelector("#tagAssetList");
 const tagSummary = document.querySelector("#tagSummary");
+const chatPanelEl = document.querySelector("#chatPanel");
+const chatMessagesEl = document.querySelector("#chatMessages");
+const clarificationHintEl = document.querySelector("#clarificationHint");
+const clearChatButton = document.querySelector("#clearChatButton");
 
 const ASSET_PREVIEW_LIMIT = 96;
 let currentResults = [];
@@ -59,6 +63,8 @@ let personsLoaded = false;
 let statusLoaded = false;
 let tagsLoaded = false;
 let selectedTag = "";
+let currentSessionId = null;
+let chatMessages = [];
 
 document.querySelectorAll(".tab-button").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
@@ -88,10 +94,19 @@ fileInput.addEventListener("change", async () => {
   }
 });
 
-searchButton.addEventListener("click", search);
-queryInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") search();
+searchButton.addEventListener("click", () => {
+  if (currentSessionId) chatSearch();
+  else search();
 });
+queryInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    if (currentSessionId) chatSearch();
+    else search();
+  }
+});
+if (clearChatButton) {
+  clearChatButton.addEventListener("click", clearChat);
+}
 strictFilter.addEventListener("change", renderSearchResults);
 resultLimit.addEventListener("change", () => {
   if (queryInput.value.trim()) search();
@@ -709,6 +724,111 @@ function isStrongResult(item) {
   );
   return displayScore >= 0.72 || hasStructuredHit;
 }
+
+// ── Multi-turn chat ──────────────────────────────────────────
+
+async function chatSearch(queryOverride) {
+  const query = (queryOverride || queryInput.value).trim();
+  if (!query) {
+    statusBox.textContent = "请输入检索描述。";
+    return;
+  }
+  statusBox.textContent = "Agent 正在分析对话上下文...";
+  try {
+    const library = searchLibrary?.value || "all";
+    const body = { query, library };
+    if (currentSessionId) body.session_id = currentSessionId;
+
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+
+    currentSessionId = payload.session_id;
+    renderPlan(payload.plan);
+    currentResults = payload.results || [];
+    renderSearchResults();
+
+    // Add messages to chat
+    addChatMessage("user", query);
+    const agentMsg = payload.results.length
+      ? `找到 ${payload.results.length} 个结果`
+      : "没有找到匹配的结果。";
+    addChatMessage("agent", agentMsg, payload.plan);
+
+    // Show clarification hint if needed
+    if (payload.should_clarify && payload.clarification_text) {
+      showClarification(payload.clarification_text);
+    } else {
+      hideClarification();
+    }
+
+    showChatPanel();
+    statusBox.textContent = payload.results.length
+      ? `找到 ${payload.results.length} 个结果。可以继续描述来精炼检索。`
+      : "可以换个方式描述试试。";
+  } catch (error) {
+    statusBox.textContent = `对话检索失败：${error.message}`;
+  }
+}
+
+function addChatMessage(role, content, plan) {
+  chatMessages.push({ role, content, plan });
+  renderChatMessages();
+}
+
+function renderChatMessages() {
+  if (!chatMessagesEl) return;
+  chatMessagesEl.innerHTML = chatMessages
+    .map((msg) => {
+      const label = msg.role === "user" ? "你" : "Agent";
+      const meta =
+        msg.role === "agent" && msg.plan
+          ? `<div class="bubble-meta">${escapeHtml(msg.plan.agent_summary || "")}</div>`
+          : "";
+      return `
+        <div class="chat-bubble ${msg.role}">
+          <div class="bubble-label">${label}</div>
+          <div>${escapeHtml(msg.content)}</div>
+          ${meta}
+        </div>`;
+    })
+    .join("");
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+
+function showClarification(text) {
+  if (!clarificationHintEl) return;
+  clarificationHintEl.textContent = `💡 ${text}（点击填入输入框）`;
+  clarificationHintEl.hidden = false;
+  clarificationHintEl.onclick = () => {
+    queryInput.value = "";
+    queryInput.focus();
+  };
+}
+
+function hideClarification() {
+  if (clarificationHintEl) clarificationHintEl.hidden = true;
+}
+
+function showChatPanel() {
+  if (chatPanelEl && chatPanelEl.hidden) {
+    chatPanelEl.hidden = false;
+  }
+}
+
+function clearChat() {
+  currentSessionId = null;
+  chatMessages = [];
+  hideClarification();
+  if (chatMessagesEl) chatMessagesEl.innerHTML = "";
+  if (chatPanelEl) chatPanelEl.hidden = true;
+  statusBox.textContent = "对话已清空。";
+}
+
+// ── End chat ─────────────────────────────────────────────────
 
   function renderPlan(plan) {
     if (!plan) {
