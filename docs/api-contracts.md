@@ -16,7 +16,7 @@
 
 ### GET `/api/search`
 
-用途：自然语言检索入口，由 Agent 完成意图解析、条件拆解、多路召回和重排。
+用途：单次自然语言检索入口，由 Agent 完成意图解析、条件拆解、多路召回和重排。不保留对话上下文。
 
 查询参数：
 
@@ -28,24 +28,24 @@
 
 ```json
 {
-  "query": "person_0001 在海边",
-  "plan": {
-    "intent": "search",
-    "conditions": {},
-    "query_rewrites": [],
-    "trace": []
+  “query”: “person_0001 在海边”,
+  “plan”: {
+    “intent”: “search”,
+    “conditions”: {},
+    “query_rewrites”: [],
+    “trace”: []
   },
-  "results": [
+  “results”: [
     {
-      "id": "asset_xxx",
-      "filename": "demo.jpg",
-      "kind": "image",
-      "library": "personal",
-      "display_score": 0.73,
-      "tag_hits": [],
-      "ocr_hits": [],
-      "metadata_hits": [],
-      "explanation": []
+      “id”: “asset_xxx”,
+      “filename”: “demo.jpg”,
+      “kind”: “image”,
+      “library”: “personal”,
+      “display_score”: 0.73,
+      “tag_hits”: [],
+      “ocr_hits”: [],
+      “metadata_hits”: [],
+      “explanation”: []
     }
   ]
 }
@@ -54,8 +54,109 @@
 约定：
 
 - 前端只展示 `display_score`，不要直接解释原始 CLIP 相似度。
-- Agent 新增能力时，应写入 `plan.trace`，便于答辩展示“系统不是黑盒”。
+- Agent 新增能力时，应写入 `plan.trace`，便于答辩展示”系统不是黑盒”。
 - 如果查询包含人物别名，后端负责映射到 `person_id`，前端不做别名解析。
+
+### POST `/api/chat`
+
+用途：多轮对话检索入口。与 `/api/search` 的区别是它会维护会话上下文，支持用户通过多轮对话逐步精炼检索条件（如”只要视频””不要风景””换成海边”）。
+
+请求体：
+
+```json
+{
+  “query”: “找春天的照片”,
+  “session_id”: “a1b2c3d4e5f6”,
+  “library”: “all”,
+  “limit”: 36
+}
+```
+
+- `session_id`：可选。首次对话不传，后端会创建并返回新 session；后续轮次传入以保持上下文。
+- `library`：`all/public/personal`，默认 `all`。
+- `limit`：返回结果上限，默认 36，最大 80。
+
+返回核心字段：
+
+```json
+{
+  “session_id”: “a1b2c3d4e5f6”,
+  “results”: [],
+  “plan”: {
+    “intent”: “chat”,
+    “chat_agent”: {
+      “provider”: “deepseek”,
+      “model”: “deepseek-chat”,
+      “search_query”: “春天的照片”,
+      “reason”: “新对话，直接检索”,
+      “llm_intent”: “search”
+    },
+    “chat_intent”: “search”,
+    “chat_entities”: {
+      “people”: [],
+      “locations”: [],
+      “scenes”: [“春天”],
+      “objects”: [],
+      “actions”: [],
+      “time”: [],
+      “media_type”: null,
+      “library”: “all”,
+      “negatives”: []
+    }
+  },
+  “should_clarify”: false,
+  “clarification_text”: “”,
+  “answer”: “正在检索春天的照片。找到 12 个结果。”,
+  “search_query”: “春天的照片”,
+  “llm_used”: true
+}
+```
+
+语义分析流程：
+
+1. 前端发送 query + session_id。
+2. 后端调用 DeepSeek LLM 做**意图分类**（search/refine/clarify/chat）、**实体提取**（人物、地点、场景、物体、动作、时间、媒体类型、否定条件）、**上下文合并**（将简短补全合并为完整 search_query）。
+3. LLM 返回的 `entities` 注入 `SearchAgent.build_plan()` 的 QueryPlan，补充规则解析的盲区。
+4. `search_query` 经人物名扩展后进入多路召回和融合重排。
+5. 结果经对话级否定过滤（`apply_chat_negative_filters`）后返回。
+
+约定：
+
+- `should_clarify` 为 true 时前端应展示 `clarification_text`，引导用户补充条件。
+- 连续 30 分钟无活动后会话自动过期。
+- 前端对话检索结果**仅在对话框内展示**，不更新主界面结果网格。
+
+### GET `/api/chat/sessions`
+
+用途：列出当前所有活跃会话。
+
+返回：
+
+```json
+{
+  “sessions”: [
+    {
+      “session_id”: “a1b2c3d4e5f6”,
+      “library”: “all”,
+      “message_count”: 6,
+      “created_at”: “2026-07-08T21:30:00”,
+      “last_active”: “2026-07-08T21:35:00”
+    }
+  ]
+}
+```
+
+### POST `/api/chat/clear`
+
+用途：清除指定会话及其历史消息。
+
+请求体：
+
+```json
+{
+  “session_id”: “a1b2c3d4e5f6”
+}
+```
 
 ### GET `/api/status`
 

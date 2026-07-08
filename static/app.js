@@ -922,10 +922,17 @@ async function chatSearch(queryOverride) {
     if (!response.ok) throw new Error(payload.error || "对话检索失败");
     currentSessionId = payload.session_id;
     renderPlan(payload.plan);
-    currentResults = payload.results || [];
-    renderSearchResults();
+
+    // 对话检索结果仅在对话框内展示，不更新主界面
+    const allResults = payload.results || [];
+    const imageResults = allResults.filter((item) => item.kind === "image");
+    const strictImageResults = imageResults.filter(isStrongResult);
+    // 严格筛选图片结果，限制最多展示 9 个
+    const dialogResults = strictImageResults.slice(0, 9);
+
     addChatMessage("user", query);
-    addChatMessage("agent", payload.answer || (currentResults.length ? `找到 ${currentResults.length} 个结果。` : "没有找到匹配结果。"), payload.plan);
+    addChatMessage("agent", payload.answer || (allResults.length ? `找到 ${allResults.length} 个结果。` : "没有找到匹配结果。"), payload.plan, dialogResults, allResults.length);
+
     if (chatInput) chatInput.value = "";
     if (payload.should_clarify && payload.clarification_text) {
       showClarification(payload.clarification_text);
@@ -933,16 +940,16 @@ async function chatSearch(queryOverride) {
       hideClarification();
     }
     showChatPanel();
-    statusBox.textContent = currentResults.length
-      ? `找到 ${currentResults.length} 个结果，可以继续输入条件精炼。`
+    statusBox.textContent = allResults.length
+      ? `对话检索找到 ${allResults.length} 个结果（对话框内展示 ${dialogResults.length} 个精选图片）。`
       : "没有找到匹配结果，可以换个描述方式。";
   } catch (error) {
     statusBox.textContent = `对话检索失败：${error.message}`;
   }
 }
 
-function addChatMessage(role, content, plan) {
-  chatMessages.push({ role, content, plan });
+function addChatMessage(role, content, plan, dialogResults, totalCount) {
+  chatMessages.push({ role, content, plan, dialogResults: dialogResults || [], totalCount: totalCount || 0 });
   renderChatMessages();
 }
 
@@ -953,14 +960,60 @@ function renderChatMessages() {
     const meta = message.role === "agent" && message.plan?.agent_summary
       ? `<div class="bubble-meta">${escapeHtml(message.plan.agent_summary)}</div>`
       : "";
+
+    // 渲染对话框内的图片结果
+    let resultsHtml = "";
+    if (message.role === "agent" && message.dialogResults && message.dialogResults.length > 0) {
+      const cards = message.dialogResults.map((item) => {
+        return `
+          <div class="bubble-result-card" data-asset-id="${escapeHtml(item.id)}" role="button" tabindex="0" title="${escapeHtml(item.filename)}">
+            <img class="bubble-thumb" src="${thumbnailUrl(item)}" alt="${escapeHtml(item.filename)}" loading="lazy" decoding="async" onerror="this.classList.add('thumb-missing'); this.removeAttribute('src');" />
+            <div class="bubble-result-info">${escapeHtml(truncateFilename(item.filename, 18))}</div>
+          </div>`;
+      }).join("");
+
+      let moreHtml = "";
+      if (message.totalCount > 9) {
+        moreHtml = `<div class="bubble-result-more">还有 ${message.totalCount - 9} 个结果未展示，可继续精炼条件</div>`;
+      } else if (message.totalCount > message.dialogResults.length) {
+        moreHtml = `<div class="bubble-result-more">严格筛选展示 ${message.dialogResults.length} 个精选结果（共 ${message.totalCount} 个）</div>`;
+      }
+
+      resultsHtml = `
+        <div class="bubble-results">${cards}</div>
+        ${moreHtml}`;
+    }
+
     return `
       <div class="chat-bubble ${message.role}">
         <div class="bubble-label">${label}</div>
         <div>${escapeHtml(message.content)}</div>
+        ${resultsHtml}
         ${meta}
       </div>`;
   }).join("");
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+
+  // 为对话框内的图片结果绑定点击事件
+  chatMessagesEl.querySelectorAll(".bubble-result-card[data-asset-id]").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      const assetId = event.currentTarget.dataset.assetId;
+      if (assetId) openAssetDetail(assetId);
+    });
+  });
+}
+
+function truncateFilename(filename, maxLen) {
+  if (!filename) return "";
+  if (filename.length <= maxLen) return filename;
+  const ext = filename.lastIndexOf(".");
+  if (ext > 0) {
+    const name = filename.substring(0, ext);
+    const suffix = filename.substring(ext);
+    const available = maxLen - suffix.length - 1;
+    if (available > 3) return name.substring(0, available) + "…" + suffix;
+  }
+  return filename.substring(0, maxLen - 1) + "…";
 }
 
 function showClarification(text) {

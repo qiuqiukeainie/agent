@@ -453,8 +453,12 @@ class QueryPlan:
         return asdict(self)
 
 
-REFINEMENT_STARTERS = ["只要", "只看", "仅", "不要", "去掉", "排除", "换成", "改成", "缩小", "过滤"]
-STANDALONE_REFINEMENTS = {"视频", "图片", "照片", "文档", "室内", "室外", "白天", "晚上", "个人库", "公共库"}
+REFINEMENT_STARTERS = ["只要", "只看", "仅", "不要", "去掉", "排除", "换成", "改成", "缩小", "过滤", "再加", "加上", "还要", "另外"]
+STANDALONE_REFINEMENTS = {"视频", "图片", "照片", "文档", "室内", "室外", "白天", "晚上", "个人库", "公共库", "合影", "自拍", "风景", "宠物", "美食"}
+NEGATIVE_MARKERS = ["不要", "去掉", "排除", "不包含", "别要", "除了"]
+REPLACE_MARKERS = ["换成", "改成", "改为", "换为"]
+ADD_MARKERS = ["只要", "只看", "仅", "再加", "加上", "还要", "另外", "也加", "增加"]
+MEDIA_SWITCH_WORDS = {"视频": "视频", "图片": "图片", "照片": "图片", "图像": "图片", "文档": "文档"}
 
 
 def merge_with_chat_history(query: str, chat_history: list[dict] | None) -> str:
@@ -469,14 +473,62 @@ def merge_with_chat_history(query: str, chat_history: list[dict] | None) -> str:
     if not previous_user_queries:
         return query
     last_query = previous_user_queries[-1]
-    if any(query.startswith(starter) for starter in REFINEMENT_STARTERS):
-        if query.startswith(("不要", "去掉", "排除")):
-            return f"{last_query} {query}"
-        if query.startswith(("换成", "改成")):
-            return query[2:].strip() or query
+
+    # 纯否定词：合并到上一轮查询
+    if any(query.startswith(marker) for marker in NEGATIVE_MARKERS):
         return f"{last_query} {query}"
+
+    # 替换类：换成XX → 从上一轮查询中移除旧条件并替换
+    if any(query.startswith(marker) for marker in REPLACE_MARKERS):
+        replacement = query[2:].strip()
+        if not replacement:
+            return last_query
+        # 如果上一轮查询包含对立条件，尝试替换
+        cleaned = last_query
+        for word, kind in MEDIA_SWITCH_WORDS.items():
+            if replacement in (word, kind) or word in replacement:
+                for other_word, other_kind in MEDIA_SWITCH_WORDS.items():
+                    if other_kind != kind and other_word in cleaned:
+                        cleaned = cleaned.replace(other_word, replacement.split()[-1] if len(replacement) > 2 else replacement)
+                        return cleaned
+        return f"{last_query} {replacement}"
+
+    # 追加类：只要XX / 再加XX → 合并到上一轮
+    if any(query.startswith(marker) for marker in ADD_MARKERS):
+        addition = query
+        for marker in ADD_MARKERS:
+            if query.startswith(marker):
+                addition = query[len(marker):].strip()
+                break
+        if not addition:
+            return last_query
+        return f"{last_query} {addition}"
+
+    # 单关键词补全：视频/图片/文档等
     if query in STANDALONE_REFINEMENTS or len(query) <= 3:
         return f"{last_query} {query}"
+
+    # 以"的"开头：指代上一轮结果（如"个人库里的""高清的"）
+    if query.startswith("的") or query.endswith("的"):
+        return f"{last_query}{query}"
+
+    # 包含"也""还""再"等追加信号
+    if any(word in query for word in ["也要", "还要", "再看", "也看", "再找"]):
+        return f"{last_query} {query}"
+
+    # 代词/省略补全：如果查询没有明确主语/动词且很短，可能是对上一轮的补充
+    if len(query) <= 6 and not any(
+        word in query for word in ["找", "搜索", "检索", "查", "show", "find", "search"]
+    ):
+        # 检查是否可能是独立查询（包含具体名词）
+        has_concrete = any(
+            word in query
+            for word_list in [LOCATION_WORDS, SCENE_WORDS, OBJECT_WORDS]
+            for word in word_list
+        )
+        if not has_concrete:
+            return f"{last_query} {query}"
+
     return query
 
 

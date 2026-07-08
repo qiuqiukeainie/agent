@@ -18,6 +18,7 @@
 - `标签`：标签浏览、按标签查看素材、观察 OCR/ASR/人工标签等来源。
 - `人物`：个人库人脸聚类、人物命名、合并、删除、按人物筛选。
 - `系统`：状态、任务队列、评测、Agent 建议、统计信息。
+- `智能体对话`（悬浮面板）：多轮对话检索，右下角 FAB 按钮唤起。对话结果仅在面板内展示，不写入主界面结果网格。
 
 新功能应优先放入最贴近的视图，避免继续堆到首页。比如 OCR 批处理属于 `系统`，人物别名属于 `人物`，文档搜索结果展示属于 `搜索/素材库`。
 
@@ -26,9 +27,11 @@
 `static/app.js` 中的核心状态变量：
 
 - `currentAssets`：素材库当前缓存。
-- `currentResults`：最近一次搜索结果。
+- `currentResults`：最近一次搜索结果。**注意：对话检索（chatSearch）不更新此变量**，对话结果仅在对话框内展示。
 - `currentDetail`：详情弹窗中打开的素材。
 - `currentPersons`：人物聚类列表。
+- `currentSessionId`：多轮对话的 session_id，由 `/api/chat` 返回并维护。
+- `chatMessages`：对话面板的消息历史，包含 `role`、`content`、`plan`、`dialogResults`（对话框内图片结果）、`totalCount`。
 - `assetsLoaded/personsLoaded/statusLoaded/tagsLoaded`：控制懒加载，避免页面初次进入时一次性加载所有模块导致卡顿。
 
 新增视图时建议也采用懒加载：第一次打开视图时请求数据，后续通过刷新按钮或操作结果局部更新。
@@ -77,6 +80,8 @@ fetch("/api/asset-tags", { method: "POST", body: JSON.stringify(payload) })
 - 列表容器 id：对象 + `List/Rows/Grid`，例如 `personList`、`tagRows`、`resultGrid`。
 - 状态区域 id：对象 + `Status/Panel`，例如 `detailStatus`、`healthPanel`。
 - CSS 类名：模块前缀 + 语义名，例如 `person-card`、`eval-profile`、`asset-thumb`。
+  - 对话面板使用 `chat-` 前缀：`chat-panel`、`chat-messages`、`chat-bubble`、`chat-input-row`。
+  - 对话框内图片结果使用 `bubble-` 前缀：`bubble-results`、`bubble-result-card`、`bubble-thumb`、`bubble-result-more`。
 - data 属性：用于事件委托，例如 `data-asset-id`、`data-person-id`、`data-tag-name`。
 
 ## 不建议在前端做的事
