@@ -447,9 +447,37 @@ class QueryPlan:
     strict_conditions: dict[str, object]
     negative_conditions: dict[str, list[str]]
     interaction_frames: list[dict[str, object]]
+    structured_slots: dict[str, list[str] | dict[str, object]]
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+REFINEMENT_STARTERS = ["只要", "只看", "仅", "不要", "去掉", "排除", "换成", "改成", "缩小", "过滤"]
+STANDALONE_REFINEMENTS = {"视频", "图片", "照片", "文档", "室内", "室外", "白天", "晚上", "个人库", "公共库"}
+
+
+def merge_with_chat_history(query: str, chat_history: list[dict] | None) -> str:
+    query = str(query or "").strip()
+    if not query or not chat_history:
+        return query
+    previous_user_queries = [
+        str(message.get("content") or "").strip()
+        for message in chat_history
+        if message.get("role") == "user" and str(message.get("content") or "").strip()
+    ]
+    if not previous_user_queries:
+        return query
+    last_query = previous_user_queries[-1]
+    if any(query.startswith(starter) for starter in REFINEMENT_STARTERS):
+        if query.startswith(("不要", "去掉", "排除")):
+            return f"{last_query} {query}"
+        if query.startswith(("换成", "改成")):
+            return query[2:].strip() or query
+        return f"{last_query} {query}"
+    if query in STANDALONE_REFINEMENTS or len(query) <= 3:
+        return f"{last_query} {query}"
+    return query
 
 
 class SearchAgent:
@@ -461,9 +489,15 @@ class SearchAgent:
     face/person index.
     """
 
-    def build_plan(self, query: str, now: datetime | None = None) -> QueryPlan:
+    def build_plan(
+        self,
+        query: str,
+        now: datetime | None = None,
+        chat_history: list[dict] | None = None,
+    ) -> QueryPlan:
         now = now or datetime.now()
-        normalized = " ".join(query.strip().split())
+        merged_query = merge_with_chat_history(query, chat_history)
+        normalized = " ".join(merged_query.strip().split())
         unresolved = {
             "people": extract_people(normalized),
             "locations": extract_location_words(normalized),
@@ -525,6 +559,7 @@ class SearchAgent:
             strict_conditions=strict_conditions,
             negative_conditions=negative_conditions,
             interaction_frames=interaction_frames,
+            structured_slots=build_structured_slots(normalized, unresolved, executable_filters, strict_conditions),
         )
 
 
@@ -593,9 +628,46 @@ def extract_time_words(query: str) -> list[str]:
 
 def extract_location_words(query: str) -> list[str]:
     found = [word for word in sorted(LOCATION_WORDS, key=len, reverse=True) if word in query]
-    found.extend(re.findall(r"\u5728([\u4e00-\u9fffA-Za-z0-9_]{2,12}?)(?:\u62cd|\u7684|\u5408\u5f71|\u7167\u7247|\u56fe\u7247)", query))
+    found.extend(
+        sanitize_location_candidate(match)
+        for match in re.findall(
+            r"\u5728([\u4e00-\u9fffA-Za-z0-9_]{2,18}?)(?:\u62cd|\u5408\u5f71|\u7167\u7247|\u56fe\u7247|\u7684|,|，|。|\s|$)",
+            query,
+        )
+    )
     invalid = {"\u8f66\u5e95", "\u8f66\u4e0a", "\u5de6\u8fb9", "\u53f3\u8fb9"}
-    return unique([item for item in found if item not in invalid and not re.match(r"person[_-]?\d+", item, flags=re.IGNORECASE)])
+    return unique(
+        [
+            item
+            for item in found
+            if item
+            and item not in invalid
+            and not re.match(r"person[_-]?\d+", item, flags=re.IGNORECASE)
+        ]
+    )
+
+
+def sanitize_location_candidate(value: str) -> str:
+    candidate = str(value or "").strip()
+    for boundary in [
+        "\u5403",
+        "\u559d",
+        "\u9a91",
+        "\u62ff",
+        "\u6253",
+        "\u770b",
+        "\u73a9",
+        "\u8bfb",
+        "\u8dd1",
+        "\u8d70",
+        "\u8df3",
+        "\u62cd",
+        "\u5408\u5f71",
+        "\u7167\u7247",
+    ]:
+        if boundary in candidate:
+            candidate = candidate.split(boundary, 1)[0]
+    return candidate.strip()
 
 
 def extract_scene_words(query: str) -> list[str]:
@@ -778,7 +850,7 @@ def extract_media_words(query: str) -> list[str]:
         media.append("image")
     if any(word in lowered for word in ["video", "clip", "footage"]):
         media.append("video")
-    if any(word in query.lower() for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md"]):
+    if any(word in query for word in ["\u6587\u6863", "\u62a5\u544a", "\u6587\u7ae0", "\u8d44\u6599", "\u6b63\u6587"]) or any(word in lowered for word in ["pdf", "docx", "pptx", "md", "document", "article"]):
         media.append("document")
     return media
 
@@ -871,6 +943,10 @@ def infer_strict_conditions(query: str) -> dict[str, object]:
 
 
 def infer_people_count(query: str) -> int | None:
+    if re.search(r"我\s*[和跟与]\s*[\u4e00-\u9fffA-Za-z0-9_]{1,16}", query):
+        return 2
+    if re.search(r"[\u4e00-\u9fffA-Za-z0-9_]{1,16}\s*[和跟与]\s*我", query):
+        return 2
     for count, words in [
         (2, ["\u4e24\u4e2a\u4eba", "\u4e8c\u4eba", "\u4e24\u4eba", "\u53cc\u4eba"]),
         (3, ["\u4e09\u4e2a\u4eba", "\u4e09\u4eba"]),
@@ -914,7 +990,7 @@ def infer_executable_filters(query: str, now: datetime) -> dict[str, str | int |
         media_kind = "video"
     elif any(word in query for word in ["\u7167\u7247", "\u56fe\u7247", "\u56fe\u50cf", "\u5408\u5f71", "\u76f8\u7247"]) or any(word in lowered for word in ["photo", "picture", "image"]):
         media_kind = "image"
-    elif any(word in lowered for word in ["\u6587\u6863", "\u62a5\u544a", "pdf", "docx", "pptx", "md", "document"]):
+    elif any(word in query for word in ["\u6587\u6863", "\u62a5\u544a", "\u6587\u7ae0", "\u8d44\u6599", "\u6b63\u6587"]) or any(word in lowered for word in ["pdf", "docx", "pptx", "md", "document", "article"]):
         media_kind = "document"
 
     return {"year": year, "season": season, "kind": media_kind}
@@ -939,8 +1015,47 @@ def build_visual_prompts(unresolved: dict[str, list[str]]) -> list[str]:
     actions = flatten_prompts(unresolved.get("actions", []), ACTION_WORDS)
     times = flatten_prompts(unresolved.get("time_words", []), EN_TIME_PROMPTS)
     relations = unresolved.get("relations", [])
+    people = unresolved.get("people", [])
     wants_video = "video" in unresolved.get("media", [])
     prompts = []
+    has_people_context = bool(
+        people
+        or {"person", "man", "woman", "child", "people"} & set(objects)
+        or any(scene in scenes for scene in ["group photo", "people posing together", "portrait photo", "person", "selfie"])
+        or any(action in actions for action in ["taking a photo", "walking", "running", "dancing"])
+    )
+    if has_people_context and locations:
+        location = locations[0]
+        if wants_video:
+            prompts.extend(
+                [
+                    f"a video of people at {location}",
+                    f"a video of a person at {location}",
+                ]
+            )
+        prompts.extend(
+            [
+                f"a photo of people at {location}",
+                f"a photo of a person at {location}",
+                f"a group photo at {location}",
+                f"people posing together at {location}",
+            ]
+        )
+        if "taking a photo" in actions:
+            prompts.extend(
+                [
+                    f"people taking a photo at {location}",
+                    f"a person taking a photo at {location}",
+                    f"a travel photo with people at {location}",
+                ]
+            )
+    elif has_people_context:
+        prompts.extend(["a photo of people", "a group photo", "a portrait photo of a person"])
+
+    if has_people_context and scenes:
+        prompts.append(f"a photo of people in {scenes[0]}")
+        prompts.append(f"a person in {scenes[0]}")
+
     for relation in relations:
         relation_prompt = relation_to_prompt(relation)
         if wants_video:
@@ -1136,6 +1251,31 @@ def unique_pairs(values: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
             seen.add(pair)
             result.append(pair)
     return result
+
+
+def build_structured_slots(
+    query: str,
+    unresolved: dict[str, list[str]],
+    executable_filters: dict[str, str | int | None],
+    strict_conditions: dict[str, object],
+) -> dict[str, list[str] | dict[str, object]]:
+    slots: dict[str, list[str] | dict[str, object]] = {
+        "people": unresolved.get("people", []),
+        "locations": unresolved.get("locations", []),
+        "scenes": unresolved.get("scenes", []),
+        "objects": unresolved.get("objects", []),
+        "actions": unresolved.get("actions", []),
+        "relations": unresolved.get("relations", []),
+        "time_words": unresolved.get("time_words", []),
+        "media": unresolved.get("media", []),
+        "filters": {key: value for key, value in executable_filters.items() if value is not None},
+        "strict": strict_conditions,
+    }
+    if re.search(r"我\s*[和跟与]\s*[\u4e00-\u9fffA-Za-z0-9_]{1,16}", query):
+        slots["implicit_subjects"] = ["我", "对方人物"]
+    if "拍" in query and not unresolved.get("actions"):
+        slots["actions"] = ["拍照"]
+    return slots
 
 
 def build_downstream_requirements(unresolved: dict[str, list[str]]) -> list[str]:

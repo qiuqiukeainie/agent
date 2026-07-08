@@ -26,6 +26,7 @@ from vector_engine import (
     VectorEngine,
     cosine_similarity,
 )
+from chat_engine import route_chat, session_store
 
 
 ROOT = Path(__file__).parent.resolve()
@@ -75,14 +76,33 @@ class AppHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self.serve_file(STATIC_DIR / "index.html", no_cache=True)
+        if parsed.path == "/e":
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", "/search")
+            self.end_headers()
+            return
+        if parsed.path in {"/search", "/library", "/tags", "/people", "/tasks", "/system"}:
+            return self.serve_file(STATIC_DIR / "e-index.html", no_cache=True)
         if parsed.path == "/api/assets":
-            return self.send_json({"assets": ENGINE.list_assets()})
+            params = parse_qs(parsed.query)
+            return self.send_json(list_assets_response(params))
+        asset_match = re.fullmatch(r"/api/asset/([^/]+)", parsed.path)
+        if asset_match:
+            try:
+                return self.send_json(ENGINE.asset_detail(unquote(asset_match.group(1))))
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
         if parsed.path == "/api/asset":
             asset_id = parse_qs(parsed.query).get("id", [""])[0]
             try:
                 return self.send_json({"asset": ENGINE.asset_detail(asset_id)})
             except Exception as exc:
                 return self.send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+        if parsed.path == "/api/tag-assets":
+            params = parse_qs(parsed.query)
+            tag = params.get("tag", [""])[0]
+            library = params.get("library", ["all"])[0]
+            return self.send_json({"assets": ENGINE.tag_browser(tag=tag, library=library, limit=300).get("assets", [])})
         if parsed.path == "/api/status":
             return self.send_json(ENGINE.model_status())
         if parsed.path == "/api/stats":
@@ -114,6 +134,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             limit = parse_positive_int(params.get("limit", ["36"])[0], default=36, minimum=1, maximum=80)
             library = params.get("library", ["all"])[0]
             return self.send_json(ENGINE.agent_search(query, limit=limit, library=library))
+        if parsed.path == "/api/chat/sessions":
+            return self.send_json({"sessions": session_store.list_sessions()})
+        if parsed.path == "/api/document-search":
+            params = parse_qs(parsed.query)
+            query = params.get("q", [""])[0]
+            limit = parse_positive_int(params.get("limit", ["12"])[0], default=12, minimum=1, maximum=50)
+            library = params.get("library", ["all"])[0]
+            return self.send_json(ENGINE.document_search(query, limit=limit, library=library))
         if parsed.path.startswith("/uploads/"):
             filename = Path(parsed.path).name
             return self.serve_file(UPLOAD_DIR / filename)
@@ -125,17 +153,64 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return self.send_error(HTTPStatus.NOT_FOUND)
         if parsed.path.startswith("/static/"):
             return self.serve_file(STATIC_DIR / Path(parsed.path).name, no_cache=True)
+        if parsed.path.startswith("/assets/"):
+            return self.serve_file(STATIC_DIR / "assets" / Path(parsed.path).name, no_cache=True)
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/upload":
             return self.handle_upload()
+        tag_match = re.fullmatch(r"/api/asset/([^/]+)/tags", parsed.path)
+        if tag_match:
+            payload = self.read_json_body()
+            try:
+                result = ENGINE.set_asset_tags(
+                    asset_id=unquote(tag_match.group(1)),
+                    tags=[str(item) for item in payload.get("tags", [])],
+                    source="manual",
+                    confidence=1.0,
+                    replace_source=True,
+                )
+                ENGINE.fuse_asset_tags(unquote(tag_match.group(1)))
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "result": result})
+        if parsed.path == "/api/assets/batch":
+            payload = self.read_json_body()
+            try:
+                return self.send_json(batch_operation(payload))
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        if parsed.path == "/api/tasks":
+            payload = self.read_json_body()
+            task = submit_processing_task({"mode": payload.get("type", "ocr")})
+            return self.send_json({"task_id": task["id"], "task": task})
+        if parsed.path == "/api/persons/merge":
+            payload = self.read_json_body()
+            person_ids = [str(item) for item in payload.get("person_ids", []) if item]
+            if len(person_ids) < 2:
+                return self.send_json({"error": "person_ids requires at least two ids"}, HTTPStatus.BAD_REQUEST)
+            try:
+                result = ENGINE.merge_persons(person_ids[0], person_ids[1:])
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "result": result})
         if parsed.path == "/api/reindex-metadata":
             ENGINE.reindex_metadata()
             return self.send_json({"ok": True, "stats": ENGINE.library_stats()})
         if parsed.path == "/api/rebuild-index":
             return self.send_json(ENGINE.rebuild_index_from_uploads())
+        if parsed.path == "/api/rebuild-document-chunks":
+            payload = self.read_json_body()
+            try:
+                result = ENGINE.rebuild_document_chunks(
+                    limit=parse_optional_positive_int(payload.get("limit"), default=None, minimum=1, maximum=500),
+                    library=str(payload.get("library", "all")),
+                )
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "result": result, "stats": ENGINE.library_stats()})
         if parsed.path == "/api/import-video-samples":
             return self.send_json(import_video_samples())
         if parsed.path == "/api/rebuild-persons":
@@ -267,10 +342,52 @@ class AppHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True, "results": results})
+        if parsed.path == "/api/document-qa":
+            payload = self.read_json_body()
+            try:
+                result = ENGINE.document_qa(
+                    question=str(payload.get("question", "")),
+                    top_k=parse_optional_positive_int(payload.get("top_k"), default=6, minimum=1, maximum=12) or 6,
+                    library=str(payload.get("library", "all")),
+                )
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "result": result})
         if parsed.path == "/api/process-assets":
             payload = self.read_json_body()
             task = submit_processing_task(payload)
             return self.send_json({"ok": True, "task": task})
+        if parsed.path == "/api/chat":
+            payload = self.read_json_body()
+            try:
+                limit = parse_positive_int(str(payload.get("limit", "36")), default=36, minimum=1, maximum=80)
+                result = route_chat(
+                    query=str(payload.get("query", "")),
+                    session_id=payload.get("session_id") or None,
+                    library=str(payload.get("library", "all")),
+                    engine=ENGINE,
+                    limit=limit,
+                )
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json(result)
+        if parsed.path == "/api/chat/clear":
+            payload = self.read_json_body()
+            session_id = str(payload.get("session_id", ""))
+            if session_id:
+                session_store.delete_session(session_id)
+            return self.send_json({"ok": True})
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        asset_match = re.fullmatch(r"/api/asset/([^/]+)", parsed.path)
+        if asset_match:
+            try:
+                result = ENGINE.delete_asset(unquote(asset_match.group(1)), delete_file=True)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "result": result, "stats": ENGINE.library_stats()})
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def handle_upload(self) -> None:
@@ -622,7 +739,29 @@ def increment_task(task_id: str, done: int = 0, failed: int = 0, error: dict | N
 
 def list_tasks() -> list[dict]:
     with TASK_LOCK:
-        return sorted(TASKS.values(), key=lambda item: item["created_at"], reverse=True)[:30]
+        tasks = sorted(TASKS.values(), key=lambda item: item["created_at"], reverse=True)[:30]
+    return [task_payload_for_e(task) for task in tasks]
+
+
+def task_payload_for_e(task: dict) -> dict:
+    total = int(task.get("total") or 0)
+    done = int(task.get("done") or 0)
+    failed = int(task.get("failed") or 0)
+    raw_status = str(task.get("status") or "queued")
+    status_map = {
+        "queued": "pending",
+        "running": "running",
+        "done": "completed",
+        "failed": "failed",
+    }
+    progress = 0 if total <= 0 else round(min((done + failed) / total * 100, 100), 1)
+    return {
+        **task,
+        "type": task.get("detail") or ",".join(task.get("actions") or []),
+        "status": status_map.get(raw_status, raw_status),
+        "progress": progress,
+        "message": f"done={done}, failed={failed}, total={total}",
+    }
 
 
 def load_retrieval_evaluation(limit: int = 20) -> dict:
@@ -739,6 +878,45 @@ def write_asset_tags(payload: dict) -> list[dict]:
     ]
 
 
+def list_assets_response(params: dict[str, list[str]]) -> dict:
+    assets = ENGINE.list_assets()
+    kind = params.get("kind", ["all"])[0] or "all"
+    library = params.get("library", ["all"])[0] or "all"
+    if kind != "all":
+        assets = [asset for asset in assets if asset.get("kind") == kind]
+    if library != "all":
+        assets = [asset for asset in assets if asset.get("library") == library]
+    total = len(assets)
+    offset = parse_positive_int(params.get("offset", ["0"])[0], default=0, minimum=0, maximum=max(total, 0))
+    limit = parse_positive_int(params.get("limit", [str(total or 300)])[0], default=total or 300, minimum=1, maximum=500)
+    return {"assets": assets[offset : offset + limit], "total": total}
+
+
+def batch_operation(payload: dict) -> dict:
+    action = str(payload.get("action", "")).strip().lower()
+    asset_ids = [str(item) for item in payload.get("asset_ids", []) if item]
+    tags = [str(item) for item in payload.get("tags", []) if str(item).strip()]
+    affected = 0
+    for asset_id in asset_ids:
+        if action == "tag":
+            ENGINE.set_asset_tags(asset_id, tags, source="manual", confidence=1.0, replace_source=False)
+            ENGINE.fuse_asset_tags(asset_id)
+            affected += 1
+        elif action == "favorite":
+            ENGINE.set_favorite(asset_id, True)
+            affected += 1
+        elif action == "archive":
+            ENGINE.set_asset_tags(asset_id, ["archived"], source="manual", confidence=1.0, replace_source=False)
+            ENGINE.fuse_asset_tags(asset_id)
+            affected += 1
+        elif action == "delete":
+            ENGINE.delete_asset(asset_id, delete_file=True)
+            affected += 1
+        else:
+            raise ValueError(f"unsupported batch action: {action}")
+    return {"ok": True, "affected": affected}
+
+
 def asset_payload(asset) -> dict:
     return {
         "id": asset.id,
@@ -830,6 +1008,16 @@ def unique_path(path: Path) -> Path:
 
 
 def parse_positive_int(value: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def parse_optional_positive_int(value: object, default: int | None, minimum: int, maximum: int) -> int | None:
+    if value is None or value == "":
+        return default
     try:
         parsed = int(value)
     except (TypeError, ValueError):

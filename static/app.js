@@ -1,3 +1,5 @@
+installDocumentView();
+
 const fileInput = document.querySelector("#fileInput");
 const uploadLibrary = document.querySelector("#uploadLibrary");
 const queryInput = document.querySelector("#queryInput");
@@ -48,6 +50,21 @@ const tagLibraryFilter = document.querySelector("#tagLibraryFilter");
 const tagFacetList = document.querySelector("#tagFacetList");
 const tagAssetList = document.querySelector("#tagAssetList");
 const tagSummary = document.querySelector("#tagSummary");
+const documentQueryInput = document.querySelector("#documentQueryInput");
+const documentLibrary = document.querySelector("#documentLibrary");
+const documentSearchButton = document.querySelector("#documentSearchButton");
+const documentQaButton = document.querySelector("#documentQaButton");
+const rebuildDocumentChunks = document.querySelector("#rebuildDocumentChunks");
+const documentAnswer = document.querySelector("#documentAnswer");
+const documentResultList = document.querySelector("#documentResultList");
+const chatPanelEl = document.querySelector("#chatPanel");
+const chatMessagesEl = document.querySelector("#chatMessages");
+const clarificationHintEl = document.querySelector("#clarificationHint");
+const clearChatButton = document.querySelector("#clearChatButton");
+const closeChatButton = document.querySelector("#closeChatButton");
+const openChatButton = document.querySelector("#openChatButton");
+const chatInput = document.querySelector("#chatInput");
+const chatSendButton = document.querySelector("#chatSendButton");
 
 const ASSET_PREVIEW_LIMIT = 96;
 let currentResults = [];
@@ -59,6 +76,50 @@ let personsLoaded = false;
 let statusLoaded = false;
 let tagsLoaded = false;
 let selectedTag = "";
+let currentSessionId = null;
+let chatMessages = [];
+
+function installDocumentView() {
+  const tabs = document.querySelector(".view-tabs");
+  const searchView = document.querySelector("#searchView");
+  if (!tabs || !searchView || document.querySelector("#documentView")) return;
+
+  const tab = document.createElement("button");
+  tab.className = "tab-button";
+  tab.type = "button";
+  tab.dataset.view = "documentView";
+  tab.textContent = "文档检索";
+  const libraryTab = tabs.querySelector('[data-view="libraryView"]');
+  tabs.insertBefore(tab, libraryTab || null);
+
+  const view = document.createElement("section");
+  view.id = "documentView";
+  view.className = "view";
+  view.innerHTML = `
+    <section class="work-panel document-work-panel">
+      <div class="panel-head">
+        <div>
+          <div class="panel-title">文档切片检索与问答</div>
+          <p>按段落/章节命中文档片段，适合搜索长文大意、接口说明、项目文档和汇报材料。</p>
+        </div>
+        <button id="rebuildDocumentChunks" type="button">重建文档切片</button>
+      </div>
+      <div class="document-searchbar">
+        <input id="documentQueryInput" type="search" placeholder="试试：描写春天的文章、计算机教育文章、OCR 接口怎么调用" />
+        <select id="documentLibrary">
+          <option value="all" selected>全部库</option>
+          <option value="personal">个人库</option>
+          <option value="public">公共库</option>
+        </select>
+        <button id="documentSearchButton" type="button">搜文档</button>
+        <button id="documentQaButton" type="button">问答</button>
+      </div>
+      <div id="documentAnswer" class="document-answer"></div>
+      <div id="documentResultList" class="document-result-list"></div>
+    </section>
+  `;
+  searchView.insertAdjacentElement("afterend", view);
+}
 
 document.querySelectorAll(".tab-button").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
@@ -92,6 +153,19 @@ searchButton.addEventListener("click", search);
 queryInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") search();
 });
+clearChatButton?.addEventListener("click", clearChat);
+closeChatButton?.addEventListener("click", () => {
+  if (chatPanelEl) chatPanelEl.hidden = true;
+  if (openChatButton) openChatButton.hidden = false;
+});
+openChatButton?.addEventListener("click", () => {
+  showChatPanel();
+  chatInput?.focus();
+});
+chatSendButton?.addEventListener("click", () => chatSearch());
+chatInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") chatSearch();
+});
 strictFilter.addEventListener("change", renderSearchResults);
 resultLimit.addEventListener("change", () => {
   if (queryInput.value.trim()) search();
@@ -120,6 +194,16 @@ tagFacetList?.addEventListener("click", (event) => {
   if (item) loadTags(item.dataset.tagName);
 });
 tagAssetList?.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-asset-id]");
+  if (item) openAssetDetail(item.dataset.assetId);
+});
+documentSearchButton?.addEventListener("click", searchDocuments);
+documentQaButton?.addEventListener("click", askDocumentQuestion);
+documentQueryInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") searchDocuments();
+});
+rebuildDocumentChunks?.addEventListener("click", rebuildDocumentChunkIndex);
+documentResultList?.addEventListener("click", (event) => {
   const item = event.target.closest("[data-asset-id]");
   if (item) openAssetDetail(item.dataset.assetId);
 });
@@ -248,6 +332,108 @@ function renderTagFacet(row) {
       <span>${escapeHtml(row.name)}</span>
       <strong>${Number(row.asset_count || 0)}</strong>
     </button>
+  `;
+}
+
+async function searchDocuments() {
+  const query = (documentQueryInput?.value || "").trim();
+  if (!query) {
+    documentResultList.innerHTML = `<div class="empty">请输入文档检索问题。</div>`;
+    return;
+  }
+  documentAnswer.innerHTML = "";
+  documentResultList.innerHTML = `<div class="empty">正在检索文档片段...</div>`;
+  try {
+    const library = documentLibrary?.value || "all";
+    const url = `/api/document-search?q=${encodeURIComponent(query)}&limit=12&library=${encodeURIComponent(library)}`;
+    const response = await fetch(url);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "文档检索失败");
+    renderDocumentResults(payload.results || [], payload);
+  } catch (error) {
+    documentResultList.innerHTML = `<div class="empty">文档检索失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function askDocumentQuestion() {
+  const question = (documentQueryInput?.value || "").trim();
+  if (!question) {
+    documentAnswer.innerHTML = `<div class="empty compact">请输入文档问题。</div>`;
+    return;
+  }
+  documentAnswer.innerHTML = `<div class="empty compact">正在基于文档片段生成回答...</div>`;
+  try {
+    const response = await fetch("/api/document-qa", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        question,
+        top_k: 6,
+        library: documentLibrary?.value || "all",
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "文档问答失败");
+    const result = payload.result || {};
+    documentAnswer.innerHTML = `
+      <div class="document-answer-card">
+        <strong>回答</strong>
+        <p>${escapeHtml(result.answer || "未找到相关答案。").replace(/\n/g, "<br />")}</p>
+      </div>
+    `;
+    renderDocumentResults(result.sources || [], {mode: result.mode});
+  } catch (error) {
+    documentAnswer.innerHTML = `<div class="empty compact">文档问答失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function rebuildDocumentChunkIndex() {
+  rebuildDocumentChunks.disabled = true;
+  documentResultList.innerHTML = `<div class="empty">正在重建文档切片...</div>`;
+  try {
+    const response = await fetch("/api/rebuild-document-chunks", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({library: documentLibrary?.value || "all"}),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "重建失败");
+    const result = payload.result || {};
+    documentResultList.innerHTML = `<div class="empty">已处理 ${Number(result.processed || 0)} 个文档，当前 ${Number(result.document_chunk_count || 0)} 个切片。</div>`;
+    statusLoaded = false;
+  } catch (error) {
+    documentResultList.innerHTML = `<div class="empty">重建文档切片失败：${escapeHtml(error.message)}</div>`;
+  } finally {
+    rebuildDocumentChunks.disabled = false;
+  }
+}
+
+function renderDocumentResults(results, payload = {}) {
+  if (!results.length) {
+    documentResultList.innerHTML = `<div class="empty">没有命中文档片段。可以先上传 PDF、DOCX、PPTX、MD 或 TXT。</div>`;
+    return;
+  }
+  documentResultList.innerHTML = results.map(renderDocumentResult).join("");
+}
+
+function renderDocumentResult(item) {
+  const reason = item.match_reason || "chunk 向量与查询语义接近";
+  const section = item.section_title ? `<span>${escapeHtml(item.section_title)}</span>` : "";
+  const keywords = (item.keywords || []).slice(0, 8).map((tag) => `<em>${escapeHtml(tag)}</em>`).join("");
+  return `
+    <article class="document-result-card" data-asset-id="${escapeHtml(item.asset_id || "")}" role="button" tabindex="0">
+      <div class="document-result-head">
+        <strong>${escapeHtml(item.filename || "document")}</strong>
+        <small>${Number(item.score || 0).toFixed(4)}</small>
+      </div>
+      <div class="document-result-meta">
+        ${section}
+        <span>片段 ${Number(item.chunk_index || 0) + 1}</span>
+        <span>${escapeHtml(reason)}</span>
+      </div>
+      <p>${escapeHtml(item.snippet || item.summary || "")}</p>
+      <div class="document-keywords">${keywords}</div>
+    </article>
   `;
 }
 
@@ -685,6 +871,11 @@ async function search() {
     renderPlan(payload.plan);
     currentResults = payload.results || [];
     renderSearchResults();
+    currentSessionId = null;
+    chatMessages = [];
+    hideClarification();
+    if (chatMessagesEl) chatMessagesEl.innerHTML = "";
+    if (chatPanelEl) chatPanelEl.hidden = true;
   } catch (error) {
     statusBox.textContent = `检索失败：${error.message}`;
   }
@@ -708,6 +899,107 @@ function isStrongResult(item) {
     item.filename_score >= 0.5
   );
   return displayScore >= 0.72 || hasStructuredHit;
+}
+
+async function chatSearch(queryOverride) {
+  const query = (queryOverride || chatInput?.value || "").trim();
+  if (!query) {
+    statusBox.textContent = "请输入对话内容。";
+    return;
+  }
+  statusBox.textContent = "Agent 正在结合对话上下文检索...";
+  try {
+    const library = searchLibrary?.value || "all";
+    const limit = resultLimit?.value || "36";
+    const body = { query, library, limit };
+    if (currentSessionId) body.session_id = currentSessionId;
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "对话检索失败");
+    currentSessionId = payload.session_id;
+    renderPlan(payload.plan);
+    currentResults = payload.results || [];
+    renderSearchResults();
+    addChatMessage("user", query);
+    addChatMessage("agent", payload.answer || (currentResults.length ? `找到 ${currentResults.length} 个结果。` : "没有找到匹配结果。"), payload.plan);
+    if (chatInput) chatInput.value = "";
+    if (payload.should_clarify && payload.clarification_text) {
+      showClarification(payload.clarification_text);
+    } else {
+      hideClarification();
+    }
+    showChatPanel();
+    statusBox.textContent = currentResults.length
+      ? `找到 ${currentResults.length} 个结果，可以继续输入条件精炼。`
+      : "没有找到匹配结果，可以换个描述方式。";
+  } catch (error) {
+    statusBox.textContent = `对话检索失败：${error.message}`;
+  }
+}
+
+function addChatMessage(role, content, plan) {
+  chatMessages.push({ role, content, plan });
+  renderChatMessages();
+}
+
+function renderChatMessages() {
+  if (!chatMessagesEl) return;
+  chatMessagesEl.innerHTML = chatMessages.map((message) => {
+    const label = message.role === "user" ? "你" : "Agent";
+    const meta = message.role === "agent" && message.plan?.agent_summary
+      ? `<div class="bubble-meta">${escapeHtml(message.plan.agent_summary)}</div>`
+      : "";
+    return `
+      <div class="chat-bubble ${message.role}">
+        <div class="bubble-label">${label}</div>
+        <div>${escapeHtml(message.content)}</div>
+        ${meta}
+      </div>`;
+  }).join("");
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+
+function showClarification(text) {
+  if (!clarificationHintEl) return;
+  clarificationHintEl.textContent = text;
+  clarificationHintEl.hidden = false;
+  clarificationHintEl.onclick = () => {
+    if (chatInput) chatInput.value = text;
+    chatInput?.focus();
+  };
+}
+
+function hideClarification() {
+  if (clarificationHintEl) clarificationHintEl.hidden = true;
+}
+
+function showChatPanel() {
+  if (chatPanelEl) chatPanelEl.hidden = false;
+  if (openChatButton) openChatButton.hidden = true;
+}
+
+async function clearChat() {
+  if (currentSessionId) {
+    try {
+      await fetch("/api/chat/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: currentSessionId }),
+      });
+    } catch {
+      // Local UI can still be cleared even if the server session already expired.
+    }
+  }
+  currentSessionId = null;
+  chatMessages = [];
+  hideClarification();
+  if (chatMessagesEl) chatMessagesEl.innerHTML = "";
+  if (chatInput) chatInput.value = "";
+  statusBox.textContent = "对话已清空。";
 }
 
   function renderPlan(plan) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +86,27 @@ class MetadataStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_ocr_texts_asset ON ocr_texts(asset_id);
+
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL UNIQUE,
+                    chunk_index INTEGER NOT NULL,
+                    page_start INTEGER,
+                    page_end INTEGER,
+                    section_title TEXT,
+                    heading_path TEXT,
+                    chunk_type TEXT NOT NULL DEFAULT 'text',
+                    text TEXT NOT NULL,
+                    summary TEXT,
+                    embedding_text TEXT,
+                    keywords TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(asset_id) REFERENCES assets(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_document_chunks_asset ON document_chunks(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_document_chunks_chunk ON document_chunks(chunk_id);
 
                 CREATE TABLE IF NOT EXISTS search_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,6 +245,7 @@ class MetadataStore:
             tag_count = conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
             asset_tag_count = conn.execute("SELECT COUNT(*) FROM asset_tags").fetchone()[0]
             ocr_text_count = conn.execute("SELECT COUNT(*) FROM ocr_texts").fetchone()[0]
+            document_chunk_count = conn.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0]
             person_count = conn.execute("SELECT COUNT(*) FROM persons").fetchone()[0]
             face_count = conn.execute("SELECT COUNT(*) FROM asset_faces").fetchone()[0]
         return {
@@ -236,6 +259,7 @@ class MetadataStore:
             "tag_count": tag_count,
             "asset_tag_count": asset_tag_count,
             "ocr_text_count": ocr_text_count,
+            "document_chunk_count": document_chunk_count,
             "person_count": person_count,
             "face_count": face_count,
             "db_path": str(self.db_path),
@@ -416,6 +440,7 @@ class MetadataStore:
             conn.execute("DELETE FROM asset_faces WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM asset_tags WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM ocr_texts WHERE asset_id = ?", (asset_id,))
+            conn.execute("DELETE FROM document_chunks WHERE asset_id = ?", (asset_id,))
             conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
 
     def merge_persons(self, target_person_id: str, source_person_ids: list[str], library: str = "personal") -> list[str]:
@@ -803,9 +828,81 @@ class MetadataStore:
         signals = self.list_text_signals(asset_id)
         return " ".join(item["text"] for item in signals if item["text_type"] in text_types)
 
+    def replace_document_chunks(self, asset_id: str, chunks: list[dict]) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self.connect() as conn:
+            conn.execute("DELETE FROM document_chunks WHERE asset_id = ?", (asset_id,))
+            for chunk in chunks:
+                conn.execute(
+                    """
+                    INSERT INTO document_chunks (
+                        asset_id, chunk_id, chunk_index, page_start, page_end,
+                        section_title, heading_path, chunk_type, text, summary,
+                        embedding_text, keywords, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        asset_id,
+                        str(chunk.get("chunk_id") or ""),
+                        int(chunk.get("chunk_index") or 0),
+                        chunk.get("page_start"),
+                        chunk.get("page_end"),
+                        str(chunk.get("section_title") or ""),
+                        json.dumps(chunk.get("heading_path") or [], ensure_ascii=False),
+                        str(chunk.get("chunk_type") or "text"),
+                        str(chunk.get("text") or ""),
+                        str(chunk.get("summary") or ""),
+                        str(chunk.get("embedding_text") or chunk.get("text") or ""),
+                        json.dumps(chunk.get("keywords") or [], ensure_ascii=False),
+                        now,
+                    ),
+                )
+
+    def list_document_chunks(self, asset_id: str | None = None) -> list[dict]:
+        with self.connect() as conn:
+            if asset_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM document_chunks
+                    WHERE asset_id = ?
+                    ORDER BY chunk_index
+                    """,
+                    (asset_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM document_chunks
+                    ORDER BY asset_id, chunk_index
+                    """
+                ).fetchall()
+        return [decode_document_chunk(row) for row in rows]
+
+    def get_document_chunk(self, chunk_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM document_chunks WHERE chunk_id = ?", (chunk_id,)).fetchone()
+        return decode_document_chunk(row) if row else None
+
+    def count_document_chunks(self, asset_id: str | None = None) -> int:
+        with self.connect() as conn:
+            if asset_id:
+                return int(conn.execute("SELECT COUNT(*) FROM document_chunks WHERE asset_id = ?", (asset_id,)).fetchone()[0])
+            return int(conn.execute("SELECT COUNT(*) FROM document_chunks").fetchone()[0])
+
 
 def rows_to_dict(rows: sqlite3.Cursor) -> dict[str, int]:
     return {row[0]: row[1] for row in rows.fetchall()}
+
+
+def decode_document_chunk(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    for key in ["heading_path", "keywords"]:
+        try:
+            item[key] = json.loads(item.get(key) or "[]")
+        except Exception:
+            item[key] = []
+    return item
 
 
 def split_text_engine(engine: str) -> tuple[str, str]:

@@ -17,6 +17,23 @@ from agent_engine import QueryPlan, SearchAgent
 from metadata_store import MetadataStore
 from vector_index import VectorIndex
 
+try:
+    from document_module import (
+        DocumentChunk as BDocumentChunk,
+        SemanticRetriever as BSemanticRetriever,
+        answer_from_chunks as b_answer_from_chunks,
+        chunk_document as b_chunk_document,
+        generate_document_tags as b_generate_document_tags,
+        parse_document as b_parse_document,
+    )
+except Exception:
+    BDocumentChunk = None
+    BSemanticRetriever = None
+    b_parse_document = None
+    b_chunk_document = None
+    b_generate_document_tags = None
+    b_answer_from_chunks = None
+
 
 SUPPORTED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 SUPPORTED_VIDEO_TYPES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -102,6 +119,7 @@ class VectorEngine:
         self.storage_dir = Path(storage_dir)
         self.upload_dir = self.storage_dir / "uploads"
         self.index_path = self.storage_dir / "index.json"
+        self.document_chunk_index_path = self.storage_dir / "document_chunk_index.json"
         self.person_ignore_path = self.storage_dir / "person_ignore.json"
         self.person_merge_rules_path = self.storage_dir / "person_merge_rules.json"
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +127,10 @@ class VectorEngine:
         self.agent = SearchAgent()
         self.metadata = MetadataStore(self.storage_dir / "assets.db")
         self.assets: list[Asset] = []
+        self.document_chunk_vectors: dict[str, list[float]] = {}
+        self.document_semantic_retriever = None
+        self.document_semantic_signature = ""
+        self.document_semantic_error = ""
         self.vector_index = VectorIndex()
         self.index_asset_positions: list[int] = []
         self.load()
@@ -119,6 +141,7 @@ class VectorEngine:
     def load(self) -> None:
         if not self.index_path.exists():
             self.assets = []
+            self.load_document_chunk_index()
             return
         raw_assets = json.loads(self.index_path.read_text(encoding="utf-8"))
         self.assets = [
@@ -131,11 +154,40 @@ class VectorEngine:
             )
             for item in raw_assets
         ]
+        self.load_document_chunk_index()
 
     def save(self) -> None:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         payload = [asdict(item) for item in self.assets]
         self.index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load_document_chunk_index(self) -> None:
+        if not self.document_chunk_index_path.exists():
+            self.document_chunk_vectors = {}
+            return
+        try:
+            raw = json.loads(self.document_chunk_index_path.read_text(encoding="utf-8"))
+        except Exception:
+            self.document_chunk_vectors = {}
+            return
+        self.document_chunk_vectors = {
+            str(chunk_id): [float(value) for value in vector]
+            for chunk_id, vector in raw.items()
+            if isinstance(vector, list)
+        }
+
+    def save_document_chunk_index(self) -> None:
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        known_chunk_ids = {chunk["chunk_id"] for chunk in self.metadata.list_document_chunks()}
+        self.document_chunk_vectors = {
+            chunk_id: vector
+            for chunk_id, vector in self.document_chunk_vectors.items()
+            if chunk_id in known_chunk_ids
+        }
+        self.document_chunk_index_path.write_text(
+            json.dumps(self.document_chunk_vectors, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def add_image(self, source_path: Path, created_at: str, library: str = "public") -> Asset:
         suffix = source_path.suffix.lower()
@@ -181,7 +233,8 @@ class VectorEngine:
         suffix = source_path.suffix.lower()
         if suffix not in SUPPORTED_DOCUMENT_TYPES:
             raise ValueError(f"unsupported document format: {suffix}")
-        text = extract_document_text(source_path)
+        parsed_document = parse_document_with_b_module(source_path)
+        text = parsed_document.get("text") or extract_document_text(source_path)
         if not text.strip():
             raise ValueError(f"document text extraction produced no text: {source_path.name}")
         vector = self.encoder.encode_text(text[:1200])
@@ -204,6 +257,7 @@ class VectorEngine:
         self.metadata.sync_asset(asset, Path.cwd())
         self.metadata.set_asset_tags(asset.id, ["document", suffix.removeprefix(".")], source="system", confidence=1.0)
         self.metadata.upsert_ocr_text(asset.id, text[:20000], engine=f"document_text:{suffix.removeprefix('.')}", confidence=0.95)
+        self.index_document_chunks(asset, text, suffix.removeprefix("."), parsed_document=parsed_document)
         self.fuse_asset_tags(asset.id)
         return asset
 
@@ -267,13 +321,394 @@ class VectorEngine:
             "asset_count": len(self.assets),
         }
 
+    def index_document_chunks(
+        self,
+        asset: Asset,
+        text: str,
+        suffix: str = "document",
+        parsed_document: dict | None = None,
+    ) -> list[dict]:
+        chunks = build_document_chunks_from_b_module(asset, parsed_document) if parsed_document else []
+        if not chunks:
+            chunks = build_document_chunks(asset, text, suffix)
+        for chunk in chunks:
+            embedding_text = str(chunk.get("embedding_text") or chunk.get("text") or "")
+            self.document_chunk_vectors[chunk["chunk_id"]] = self.encoder.encode_text(embedding_text[:1600]).tolist()
+        self.metadata.replace_document_chunks(asset.id, chunks)
+        self.save_document_chunk_index()
+        document_tags = build_document_tags_from_b_module(parsed_document) if parsed_document else []
+        if not document_tags:
+            document_tags = build_document_level_tags(asset.filename, chunks, suffix)
+        if document_tags:
+            self.set_asset_tags(
+                asset.id,
+                document_tags,
+                source="document_chunk",
+                confidence=0.86,
+                replace_source=True,
+            )
+        return chunks
+
+    def rebuild_document_chunks(self, limit: int | None = None, library: str = "all") -> dict:
+        library_filter = normalize_library_filter(library)
+        processed = 0
+        failed: list[dict] = []
+        for asset in self.assets:
+            if asset.kind != "document":
+                continue
+            if library_filter != "all" and asset.library != library_filter:
+                continue
+            if limit is not None and processed >= limit:
+                break
+            try:
+                path = Path(asset.path)
+                if not path.is_absolute():
+                    path = Path.cwd() / path
+                parsed_document = parse_document_with_b_module(path, doc_id=asset.id)
+                text = parsed_document.get("text") or self.metadata.get_text_by_type(asset.id, {"document_text"}) or extract_document_text(path)
+                self.index_document_chunks(
+                    asset,
+                    text,
+                    path.suffix.lower().removeprefix(".") or "document",
+                    parsed_document=parsed_document,
+                )
+                self.fuse_asset_tags(asset.id)
+                processed += 1
+            except Exception as exc:
+                failed.append({"asset_id": asset.id, "filename": asset.filename, "error": str(exc)})
+        return {
+            "processed": processed,
+            "failed": failed[:20],
+            "document_chunk_count": self.metadata.count_document_chunks(),
+        }
+
+    def ensure_document_chunks(self) -> None:
+        changed = False
+        for asset in self.assets:
+            if asset.kind != "document":
+                continue
+            chunks = self.metadata.list_document_chunks(asset.id)
+            if not chunks:
+                try:
+                    path = Path(asset.path)
+                    if not path.is_absolute():
+                        path = Path.cwd() / path
+                    parsed_document = parse_document_with_b_module(path, doc_id=asset.id)
+                    text = parsed_document.get("text") or self.metadata.get_text_by_type(asset.id, {"document_text"}) or extract_document_text(path)
+                    chunks = self.index_document_chunks(
+                        asset,
+                        text,
+                        path.suffix.lower().removeprefix(".") or "document",
+                        parsed_document=parsed_document,
+                    )
+                    changed = True
+                except Exception:
+                    continue
+            for chunk in chunks:
+                chunk_id = str(chunk.get("chunk_id") or "")
+                if chunk_id and chunk_id not in self.document_chunk_vectors:
+                    embedding_text = str(chunk.get("embedding_text") or chunk.get("text") or "")
+                    self.document_chunk_vectors[chunk_id] = self.encoder.encode_text(embedding_text[:1600]).tolist()
+                    changed = True
+        if changed:
+            self.save_document_chunk_index()
+
+    def document_search(self, query: str, limit: int = 12, library: str = "all") -> dict:
+        query = str(query or "").strip()
+        if not query:
+            return {"query": query, "results": [], "mode": "document_chunk_hybrid"}
+        self.ensure_document_chunks()
+        library_filter = normalize_library_filter(library)
+        content_query = normalize_document_content_query(query)
+        if not content_query:
+            return {
+                "query": query,
+                "expanded_query": "",
+                "mode": "document_chunk_hybrid_skipped_empty_content",
+                "retriever_error": "",
+                "results": [],
+                "total_chunks": self.metadata.count_document_chunks(),
+            }
+        expanded_query = expand_document_query(content_query)
+        asset_by_id = {asset.id: asset for asset in self.assets}
+        candidate_chunks = []
+        for chunk in self.metadata.list_document_chunks():
+            asset = asset_by_id.get(str(chunk.get("asset_id") or ""))
+            if asset is None or asset.kind != "document":
+                continue
+            if library_filter != "all" and asset.library != library_filter:
+                continue
+            candidate_chunks.append((asset, chunk))
+
+        b_scores, b_error = self.document_semantic_scores(expanded_query, candidate_chunks, top_k=max(limit * 6, 40))
+        use_b_retriever = bool(b_scores)
+        query_vector = None if use_b_retriever else self.encoder.encode_text(expanded_query[:1600])
+        rows = []
+        for asset, chunk in candidate_chunks:
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if use_b_retriever:
+                if chunk_id not in b_scores:
+                    continue
+                vector_score = b_scores[chunk_id]
+            else:
+                raw_vector = self.document_chunk_vectors.get(chunk_id)
+                if not raw_vector or query_vector is None:
+                    continue
+                chunk_vector = np.array(raw_vector, dtype=np.float32)
+                if chunk_vector.shape != query_vector.shape:
+                    continue
+                vector_score = cosine_similarity(query_vector, chunk_vector)
+            keyword, keyword_hits = document_keyword_match(expanded_query, chunk)
+            original_keyword, original_keyword_hits = document_keyword_match(content_query, chunk)
+            if original_keyword > keyword:
+                keyword = original_keyword
+                keyword_hits = original_keyword_hits
+            title_score = keyword_score(content_query, asset.filename)
+            final_score = 0.78 * vector_score + 0.16 * keyword + 0.06 * title_score
+            if keyword_hits:
+                final_score += min(len(keyword_hits) * 0.035, 0.14)
+            if len(str(chunk.get("text") or "")) < 30:
+                final_score -= 0.12
+            rows.append(
+                {
+                    "asset_id": asset.id,
+                    "chunk_id": chunk["chunk_id"],
+                    "filename": asset.filename,
+                    "url": f"/uploads/{asset.filename}",
+                    "library": asset.library,
+                    "chunk_index": chunk["chunk_index"],
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                    "section_title": chunk.get("section_title") or "",
+                    "summary": chunk.get("summary") or summarize_text_snippet(chunk.get("text") or ""),
+                    "snippet": highlight_document_snippet(chunk.get("text") or "", query),
+                    "text": chunk.get("text") or "",
+                    "keywords": chunk.get("keywords") or [],
+                    "score": round(float(final_score), 4),
+                    "vector_score": round(float(vector_score), 4),
+                    "keyword_score": round(float(keyword), 4),
+                    "match_reason": build_document_match_reason(keyword_hits, chunk),
+                }
+            )
+        rows.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "query": query,
+            "expanded_query": expanded_query,
+            "mode": "B.semantic_retriever_hybrid" if use_b_retriever else "document_chunk_hybrid_fallback",
+            "retriever_error": b_error,
+            "results": rows[:limit],
+            "total_chunks": self.metadata.count_document_chunks(),
+        }
+
+    def document_semantic_scores(
+        self,
+        query: str,
+        candidate_chunks: list[tuple[Asset, dict]],
+        top_k: int,
+    ) -> tuple[dict[str, float], str]:
+        if BSemanticRetriever is None or BDocumentChunk is None:
+            return {}, "B SemanticRetriever is unavailable"
+        if not candidate_chunks:
+            return {}, ""
+        signature = "|".join(
+            f"{chunk.get('chunk_id')}:{len(str(chunk.get('text') or ''))}"
+            for _asset, chunk in candidate_chunks
+        )
+        try:
+            if self.document_semantic_retriever is None or self.document_semantic_signature != signature:
+                b_chunks = [
+                    BDocumentChunk(
+                        chunk_id=str(chunk.get("chunk_id") or ""),
+                        doc_id=str(chunk.get("asset_id") or ""),
+                        chunk_index=int(chunk.get("chunk_index") or index),
+                        chunk_type=str(chunk.get("chunk_type") or "text"),
+                        page_start=chunk.get("page_start"),
+                        page_end=chunk.get("page_end"),
+                        section_id=str(chunk.get("section_id") or ""),
+                        section_title=str(chunk.get("section_title") or ""),
+                        heading_path=list(chunk.get("heading_path") or []),
+                        text=str(chunk.get("text") or ""),
+                        summary=str(chunk.get("summary") or ""),
+                        embedding_text=str(chunk.get("embedding_text") or chunk.get("text") or ""),
+                    )
+                    for index, (_asset, chunk) in enumerate(candidate_chunks)
+                    if str(chunk.get("text") or "").strip()
+                ]
+                retriever = BSemanticRetriever()
+                retriever.index(b_chunks)
+                self.document_semantic_retriever = retriever
+                self.document_semantic_signature = signature
+                self.document_semantic_error = ""
+            results = self.document_semantic_retriever.search(query, top_k=top_k, min_score=0.0, min_chunk_chars=20)
+            return {chunk.chunk_id: float(score) for chunk, score in results}, ""
+        except Exception as exc:
+            self.document_semantic_error = str(exc)
+            return {}, str(exc)
+
+    def document_qa(self, question: str, top_k: int = 6, library: str = "all") -> dict:
+        top_k = max(1, min(int(top_k or 6), 12))
+        search_result = self.document_search(question, limit=top_k, library=library)
+        chunks = search_result["results"]
+        if not chunks:
+            return {
+                "question": question,
+                "answer": "未在当前素材库文档中找到可靠答案。",
+                "sources": [],
+                "mode": "extractive_document_qa",
+            }
+        reliable = [chunk for chunk in chunks if chunk["score"] >= max(chunks[0]["score"] - 0.08, 0.0)]
+        selected = reliable[: min(len(reliable), 5)] or chunks[:3]
+        if b_answer_from_chunks is not None:
+            try:
+                answer = b_answer_from_chunks(question, document_chunk_context_for_b_qa(selected))
+                if answer.get("answer"):
+                    return {
+                        "question": question,
+                        "answer": answer.get("answer", ""),
+                        "sources": selected,
+                        "source_refs": answer.get("sources", []),
+                        "mode": "B.document_module.extractive_qa",
+                    }
+            except Exception:
+                pass
+        answer_lines = []
+        for chunk in selected:
+            section = f"《{chunk['filename']}》"
+            if chunk.get("section_title"):
+                section += f"的“{chunk['section_title']}”部分"
+            answer_lines.append(f"{section}提到：{chunk['summary']}")
+        return {
+            "question": question,
+            "answer": "\n".join(answer_lines),
+            "sources": selected,
+            "mode": "extractive_document_qa",
+            "note": "当前为本地抽取式问答，只依据素材库命中文档片段组织答案；后续可接入 Dify/LLM 做更自然的归纳。",
+        }
+
     def search(self, query: str, limit: int = 12, library: str = "all") -> list[dict]:
         return self.agent_search(query, limit, library=library)["results"]
 
     def agent_search(self, query: str, limit: int = 12, library: str = "all") -> dict:
         expanded_query = self.expand_person_names(query, library=library)
         plan = self.agent.build_plan(expanded_query)
-        return {"plan": plan.to_dict(), "results": self.search_with_plan(plan, limit, library=library)}
+        return self.agent_search_with_plan(plan, limit=limit, library=library)
+
+    def agent_search_with_plan(self, plan: QueryPlan, limit: int = 12, library: str = "all") -> dict:
+        intent_strength = document_intent_strength(plan)
+        visual_limit = max(limit * 4, 36)
+        visual_results = self.search_with_plan(plan, visual_limit, library=library)
+        visual_results = [item for item in visual_results if item.get("kind") != "document"]
+        document_limit = max(min(limit, 12), 6)
+        document_results = []
+        document_payload = {
+            "mode": "document_branch_skipped_by_media_filter",
+            "total_chunks": self.metadata.count_document_chunks(),
+            "retriever_error": "",
+            "results": [],
+        }
+        if plan.executable_filters.get("kind") not in {"image", "video"}:
+            document_payload = self.document_search(plan.raw_query, limit=document_limit, library=library)
+            document_results = [
+                self.document_result_to_asset_result(item, plan)
+                for item in document_payload.get("results", [])
+            ]
+        if intent_strength < 0.35:
+            document_results = document_results[: max(1, min(3, limit // 3 or 1))]
+        merged = merge_search_results(visual_results, document_results, limit)
+        apply_display_scores(merged)
+        results = merged
+        plan_dict = plan.to_dict()
+        if document_payload is not None:
+            plan_dict["document_retrieval"] = {
+                "mode": document_payload.get("mode"),
+                "total_chunks": document_payload.get("total_chunks"),
+                "retriever_error": document_payload.get("retriever_error"),
+                "top_chunks": [
+                    {
+                        "filename": item.get("filename"),
+                        "section_title": item.get("section_title"),
+                        "score": item.get("score"),
+                    }
+                    for item in document_payload.get("results", [])[:3]
+                ],
+            }
+            if "B.document_semantic_recall" not in plan_dict["recall_routes"]:
+                plan_dict["recall_routes"] = [*plan_dict["recall_routes"], "B.document_semantic_recall"]
+        return {"plan": plan_dict, "results": results}
+
+    def document_result_to_asset_result(self, item: dict, plan: QueryPlan) -> dict:
+        asset = self.get_asset(str(item.get("asset_id") or ""))
+        if asset is None:
+            created_at = ""
+            width = 0
+            height = 0
+            tags = []
+        else:
+            created_at = asset.created_at
+            width = asset.width
+            height = asset.height
+            tags = self.metadata.get_asset_tags(asset.id)
+        raw_score = float(item.get("score") or 0.0)
+        intent_strength = document_intent_strength(plan)
+        if intent_strength >= 0.85:
+            score = 0.42 + raw_score * 0.42
+        elif intent_strength >= 0.55:
+            score = 0.30 + raw_score * 0.34
+        else:
+            score = 0.04 + raw_score * 0.52
+        keyword_score_value = float(item.get("keyword_score") or 0.0)
+        score += min(keyword_score_value * 0.10, 0.10)
+        if raw_score < 0.24 and keyword_score_value < 0.12:
+            score -= 0.08
+        if raw_score < 0.18 and keyword_score_value < 0.20:
+            score -= 0.06
+        score = max(0.0, min(score, 0.92))
+        return {
+            "id": item.get("asset_id"),
+            "filename": item.get("filename"),
+            "url": item.get("url"),
+            "kind": "document",
+            "library": item.get("library", asset.library if asset else "personal"),
+            "created_at": created_at,
+            "width": width,
+            "height": height,
+            "score": round(score, 4),
+            "clip_score": 0.0,
+            "raw_clip_score": round(raw_score, 4),
+            "best_prompt": "B.document_semantic_retriever",
+            "tag_score": round(float(item.get("keyword_score") or 0.0), 4),
+            "tag_hits": list(item.get("keywords") or [])[:6],
+            "tags": tags[:8],
+            "ocr_score": round(float(item.get("keyword_score") or 0.0), 4),
+            "ocr_hits": [],
+            "metadata_score": 0.0,
+            "constraint_score": 0.0,
+            "constraint_hits": [item.get("section_title")] if item.get("section_title") else [],
+            "constraint_misses": [],
+            "constraint_penalty": 0.0,
+            "relation_score": 0.0,
+            "relation_margin": 0.0,
+            "relation_hits": [],
+            "geometry_relation_score": 0.0,
+            "geometry_relation_hits": [],
+            "filename_score": 0.0,
+            "metadata_hits": [],
+            "deferred_conditions": plan.unresolved_conditions,
+            "document_chunk": {
+                "chunk_id": item.get("chunk_id"),
+                "section_title": item.get("section_title"),
+                "summary": item.get("summary"),
+                "snippet": item.get("snippet"),
+                "score": item.get("score"),
+                "vector_score": item.get("vector_score"),
+                "keyword_score": item.get("keyword_score"),
+                "intent_strength": round(intent_strength, 3),
+            },
+            "explanation": [
+                f"B 文档语义模型命中：{item.get('section_title') or item.get('filename')}",
+                item.get("match_reason") or "chunk 语义与查询接近",
+            ],
+        }
 
     def expand_person_names(self, query: str, library: str = "all") -> str:
         query = str(query or "")
@@ -464,9 +899,14 @@ class VectorEngine:
             "asset_count": len(self.assets),
             "indexed_count": sum(1 for item in self.assets if item.vector_model == self.encoder.name),
             "agent": "search-orchestrator-v5",
+            "agent_mode": "deepseek-llm-chat",
+            "agent_type": "multi_turn_llm_search_orchestrator",
+            "chat_llm": "deepseek-compatible",
             "vector_index": self.vector_index.backend,
             "supported_video_types": sorted(SUPPORTED_VIDEO_TYPES),
             "supported_document_types": sorted(SUPPORTED_DOCUMENT_TYPES),
+            "document_chunk_count": self.metadata.count_document_chunks(),
+            "document_module": "B.document_module" if b_parse_document is not None else "fallback",
             "routes": [
                 "intent_parse",
                 "condition_split",
@@ -477,9 +917,12 @@ class VectorEngine:
                 "fusion_rerank",
                 "relation_contrast_rerank",
                 "interaction_frame_rerank",
+                "document_chunk_search",
+                "document_extract_qa",
                 "strict_condition_rerank",
                 "negative_condition_penalty",
                 "clarification_hints",
+                "multi_turn_chat",
             ],
         }
 
@@ -617,6 +1060,7 @@ class VectorEngine:
             "asr_text": asr_text,
             "visual_text": visual_text,
             "text_signals": text_signals,
+            "document_chunks": self.metadata.list_document_chunks(asset.id)[:20] if asset.kind == "document" else [],
             "text_summary": summarize_text_signals(text_signals),
             "similar_assets": self.similar_assets(asset.id, limit=8, library=asset.library),
             "archive_suggestions": self.archive_suggestions(asset.id),
@@ -987,6 +1431,8 @@ class VectorEngine:
     def tag_browser(self, tag: str | None = None, library: str = "all", limit: int = 120) -> dict:
         library = normalize_library_filter(library)
         facets = self.metadata.tag_facets(limit=limit, library=library)
+        for facet in facets:
+            facet["count"] = facet.get("asset_count", 0)
         selected_tag = (tag or "").strip().lower()
         assets = []
         if selected_tag:
@@ -1035,7 +1481,10 @@ class VectorEngine:
         if asset is None:
             raise ValueError(f"unknown asset_id: {asset_id}")
         self.assets = [item for item in self.assets if item.id != asset_id]
+        for chunk in self.metadata.list_document_chunks(asset_id):
+            self.document_chunk_vectors.pop(str(chunk.get("chunk_id") or ""), None)
         self.save()
+        self.save_document_chunk_index()
         self.rebuild_vector_index()
         self.metadata.delete_asset(asset_id)
         removed_file = False
@@ -1542,6 +1991,82 @@ def wants_document_results(plan: QueryPlan) -> bool:
     return "document" in plan.unresolved_conditions.get("media", []) or "document" in plan.unresolved_conditions.get("text_signals", [])
 
 
+def document_intent_strength(plan: QueryPlan) -> float:
+    query = str(plan.raw_query or "").lower()
+    score = 0.0
+    if plan.executable_filters.get("kind") == "document":
+        score += 0.85
+    if "document" in plan.unresolved_conditions.get("media", []):
+        score += 0.65
+    if "document" in plan.unresolved_conditions.get("text_signals", []):
+        score += 0.35
+    strong_words = [
+        "文档",
+        "文章",
+        "报告",
+        "资料",
+        "论文",
+        "计划书",
+        "方案",
+        "正文",
+        "大意",
+        "主旨",
+        "段落",
+        "document",
+        "article",
+        "report",
+        "paper",
+        "proposal",
+    ]
+    weak_words = ["关于", "有关", "有关于", "提到", "讲述", "内容", "关键词", "总结", "摘要"]
+    visual_words = ["照片", "图片", "图像", "视频", "合影", "相册", "相片", "photo", "image", "video"]
+    if any(word in query for word in strong_words):
+        score += 0.65
+    if any(word in query for word in weak_words):
+        score += 0.22
+    if any(word in query for word in visual_words):
+        score -= 0.55
+    return max(0.0, min(score, 1.0))
+
+
+def should_use_document_branch(plan: QueryPlan) -> bool:
+    if document_intent_strength(plan) >= 0.55:
+        return True
+    query = str(plan.raw_query or "").lower()
+    document_words = [
+        "文档",
+        "文章",
+        "报告",
+        "资料",
+        "正文",
+        "主旨",
+        "关键词",
+        "讲述",
+        "提到",
+        "关于",
+        "有关于",
+        "内容",
+        "article",
+        "document",
+        "report",
+    ]
+    visual_words = ["照片", "图片", "图像", "视频", "合影", "相片", "photo", "image", "video"]
+    return any(word in query for word in document_words) and not any(word in query for word in visual_words)
+
+
+def merge_search_results(visual_results: list[dict], document_results: list[dict], limit: int) -> list[dict]:
+    merged_by_id: dict[str, dict] = {}
+    for row in [*document_results, *visual_results]:
+        asset_id = str(row.get("id") or "")
+        if not asset_id:
+            continue
+        existing = merged_by_id.get(asset_id)
+        if existing is None or float(row.get("score") or 0.0) > float(existing.get("score") or 0.0):
+            merged_by_id[asset_id] = row
+    merged = sorted(merged_by_id.values(), key=lambda item: float(item.get("score") or 0.0), reverse=True)
+    return merged[:limit]
+
+
 def interaction_prompt_boost(plan: QueryPlan, best_prompt: str, tags: list[str]) -> tuple[float, list[str]]:
     prompt = (best_prompt or "").lower()
     tag_text = " ".join(tags).lower()
@@ -2032,10 +2557,11 @@ def apply_display_scores(rows: list[dict]) -> None:
     bottom = min(raw_scores)
     spread = max(top - bottom, 1e-6)
     for rank, row in enumerate(rows):
-        relative = (float(row["score"]) - bottom) / spread
+        raw_score = max(0.0, min(float(row["score"]), 1.0))
+        relative = (raw_score - bottom) / spread
         rank_prior = max(0.0, 1.0 - rank * 0.035)
-        display = 0.55 + 0.35 * relative + 0.10 * rank_prior
-        row["display_score"] = round(min(display, 0.98), 4)
+        display = 0.18 + 0.62 * raw_score + 0.12 * relative + 0.08 * rank_prior
+        row["display_score"] = round(max(0.0, min(display, 0.92)), 4)
 
 
 def explain_search_match(
@@ -2246,6 +2772,442 @@ def expand_chinese_query(query: str) -> str:
     if not words:
         return query
     return f"{query}. {' '.join(words)}"
+
+
+def parse_document_with_b_module(path: Path, doc_id: str | None = None) -> dict:
+    if b_parse_document is None:
+        return {}
+    try:
+        result = b_parse_document(str(path), doc_id=doc_id)
+        if getattr(result, "status", "ok") == "failed":
+            return {}
+        chunks = b_chunk_document(result) if b_chunk_document is not None else []
+        tags = b_generate_document_tags(result, chunks) if b_generate_document_tags is not None else []
+        return {
+            "provider": "B.document_module",
+            "result": result,
+            "chunks": chunks,
+            "tags": tags,
+            "text": getattr(result, "text", "") or "",
+            "title": getattr(result, "title", "") or "",
+            "format": getattr(result, "format", "") or path.suffix.lower().removeprefix("."),
+            "pages": getattr(result, "pages", 0) or 0,
+        }
+    except Exception:
+        return {}
+
+
+def build_document_chunks_from_b_module(asset: Asset, parsed_document: dict | None) -> list[dict]:
+    if not parsed_document:
+        return []
+    raw_chunks = parsed_document.get("chunks") or []
+    chunks = []
+    for index, raw in enumerate(raw_chunks):
+        text = str(getattr(raw, "text", "") or "")
+        if not text.strip():
+            continue
+        chunk_id = str(getattr(raw, "chunk_id", "") or f"{asset.id}_chunk_{index:04d}")
+        if not chunk_id.startswith(asset.id):
+            chunk_id = f"{asset.id}_{chunk_id}"
+        section_title = str(getattr(raw, "section_title", "") or "")
+        heading_path = list(getattr(raw, "heading_path", []) or [])
+        summary = str(getattr(raw, "summary", "") or summarize_text_snippet(text, max_chars=180))
+        embedding_text = str(getattr(raw, "embedding_text", "") or "")
+        if not embedding_text:
+            embedding_text = "\n".join(item for item in [asset.filename, section_title, summary, text] if item)
+        chunks.append(
+            {
+                "asset_id": asset.id,
+                "chunk_id": chunk_id,
+                "chunk_index": int(getattr(raw, "chunk_index", index) or index),
+                "page_start": getattr(raw, "page_start", None),
+                "page_end": getattr(raw, "page_end", None),
+                "section_title": section_title,
+                "heading_path": heading_path,
+                "chunk_type": str(getattr(raw, "chunk_type", "") or "text"),
+                "text": text,
+                "summary": summary,
+                "embedding_text": embedding_text,
+                "keywords": extract_document_keywords(" ".join([section_title, summary, text])),
+            }
+        )
+    return chunks
+
+
+def build_document_tags_from_b_module(parsed_document: dict | None) -> list[str]:
+    if not parsed_document:
+        return []
+    tags = []
+    for tag in parsed_document.get("tags") or []:
+        name = str(getattr(tag, "name", "") or "").strip()
+        confidence = float(getattr(tag, "confidence", 0.0) or 0.0)
+        if name and confidence >= 0.45 and is_useful_tag(name):
+            tags.append(name)
+    fmt = str(parsed_document.get("format") or "").strip()
+    if fmt:
+        tags.append(fmt)
+    tags.append("document")
+    return sorted(set(tags))[:28]
+
+
+def document_chunk_context_for_b_qa(chunks: list[dict]) -> list[dict]:
+    contexts = []
+    for chunk in chunks:
+        contexts.append(
+            {
+                "chunk_id": chunk.get("chunk_id", ""),
+                "doc_id": chunk.get("asset_id", ""),
+                "filename": chunk.get("filename", ""),
+                "page": chunk.get("page_start"),
+                "section_title": chunk.get("section_title", ""),
+                "text": chunk.get("text") or chunk.get("snippet") or "",
+                "summary": chunk.get("summary", ""),
+            }
+        )
+    return contexts
+
+
+def build_document_chunks(asset: Asset, text: str, suffix: str) -> list[dict]:
+    paragraphs = normalize_document_paragraphs(text)
+    chunks: list[dict] = []
+    current: list[str] = []
+    heading_path: list[str] = []
+    current_title = ""
+    target_chars = 650
+    hard_limit = 1000
+
+    def flush() -> None:
+        nonlocal current
+        chunk_text = "\n".join(current).strip()
+        if not chunk_text:
+            current = []
+            return
+        chunk_index = len(chunks)
+        summary = summarize_text_snippet(chunk_text, max_chars=180)
+        keywords = extract_document_keywords(" ".join([asset.filename, current_title, chunk_text]))
+        embedding_text = "\n".join(
+            item
+            for item in [
+                asset.filename,
+                current_title,
+                " ".join(keywords[:12]),
+                summary,
+                chunk_text,
+            ]
+            if item
+        )
+        chunks.append(
+            {
+                "asset_id": asset.id,
+                "chunk_id": f"{asset.id}_chunk_{chunk_index:04d}",
+                "chunk_index": chunk_index,
+                "page_start": None,
+                "page_end": None,
+                "section_title": current_title,
+                "heading_path": heading_path[-4:],
+                "chunk_type": "text",
+                "text": chunk_text,
+                "summary": summary,
+                "embedding_text": embedding_text,
+                "keywords": keywords,
+            }
+        )
+        overlap = tail_overlap(chunk_text, 90)
+        current = [overlap] if overlap and len(chunk_text) > hard_limit else []
+
+    for paragraph in paragraphs:
+        heading = parse_document_heading(paragraph, suffix)
+        if heading:
+            if current:
+                flush()
+            current_title = heading
+            heading_path.append(heading)
+            continue
+        if len(paragraph) > hard_limit:
+            if current:
+                flush()
+            for piece in split_long_paragraph(paragraph, target_chars, hard_limit):
+                current.append(piece)
+                flush()
+            continue
+        tentative_len = len("\n".join([*current, paragraph]))
+        if current and tentative_len > target_chars:
+            flush()
+        current.append(paragraph)
+    if current:
+        flush()
+
+    if not chunks and text.strip():
+        clean = text.strip()
+        chunks.append(
+            {
+                "asset_id": asset.id,
+                "chunk_id": f"{asset.id}_chunk_0000",
+                "chunk_index": 0,
+                "page_start": None,
+                "page_end": None,
+                "section_title": "",
+                "heading_path": [],
+                "chunk_type": "text",
+                "text": clean,
+                "summary": summarize_text_snippet(clean),
+                "embedding_text": clean,
+                "keywords": extract_document_keywords(clean),
+            }
+        )
+    return chunks
+
+
+def normalize_document_paragraphs(text: str) -> list[str]:
+    lines = [line.strip() for line in str(text or "").splitlines()]
+    paragraphs: list[str] = []
+    buffer: list[str] = []
+    for line in lines:
+        if not line:
+            if buffer:
+                paragraphs.append(" ".join(buffer).strip())
+                buffer = []
+            continue
+        if parse_document_heading(line, ""):
+            if buffer:
+                paragraphs.append(" ".join(buffer).strip())
+                buffer = []
+            paragraphs.append(line)
+            continue
+        if len(line) <= 30 and re.match(r"^(\d+[\.\u3001]|\u7b2c.+[\u7ae0\u8282]|[一二三四五六七八九十]+[\u3001.])", line):
+            if buffer:
+                paragraphs.append(" ".join(buffer).strip())
+                buffer = []
+            paragraphs.append(line)
+            continue
+        buffer.append(line)
+    if buffer:
+        paragraphs.append(" ".join(buffer).strip())
+    return [item for item in paragraphs if item]
+
+
+def parse_document_heading(paragraph: str, suffix: str) -> str:
+    text = paragraph.strip()
+    if not text:
+        return ""
+    md_match = re.match(r"^(#{1,6})\s+(.+)$", text)
+    if md_match:
+        return md_match.group(2).strip()[:80]
+    if len(text) <= 48 and re.match(r"^(\d+(\.\d+)*[\.\u3001]?\s+|第.+[章节]\s*|[一二三四五六七八九十]+[\u3001.]\s*)", text):
+        return re.sub(r"\s+", " ", text)[:80]
+    if suffix in {"pptx"} and len(text) <= 36:
+        return text
+    return ""
+
+
+def split_long_paragraph(text: str, target_chars: int, hard_limit: int) -> list[str]:
+    sentences = re.split(r"(?<=[。！？.!?])\s*", text)
+    pieces: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not sentence:
+            continue
+        if current and len(current) + len(sentence) > target_chars:
+            pieces.append(current.strip())
+            current = ""
+        if len(sentence) > hard_limit:
+            for index in range(0, len(sentence), target_chars):
+                pieces.append(sentence[index : index + target_chars].strip())
+        else:
+            current += sentence
+    if current.strip():
+        pieces.append(current.strip())
+    return pieces
+
+
+def tail_overlap(text: str, max_chars: int) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= max_chars:
+        return ""
+    return clean[-max_chars:]
+
+
+def summarize_text_snippet(text: str, max_chars: int = 220) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    split_at = max(
+        clean.rfind("。", 0, max_chars),
+        clean.rfind(".", 0, max_chars),
+        clean.rfind("！", 0, max_chars),
+        clean.rfind("？", 0, max_chars),
+        clean.rfind(";", 0, max_chars),
+    )
+    if split_at >= 80:
+        return clean[: split_at + 1]
+    return clean[:max_chars].rstrip() + "..."
+
+
+def extract_document_keywords(text: str, limit: int = 16) -> list[str]:
+    clean = str(text or "")
+    english = [
+        token.lower()
+        for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", clean)
+        if token.lower() not in TEXT_STOPWORDS
+    ]
+    chinese = [
+        token
+        for token in re.findall(r"[\u4e00-\u9fff]{2,8}", clean)
+        if token not in {"我们", "这个", "一个", "可以", "进行", "相关", "内容", "文档", "素材"}
+    ]
+    ranked = []
+    seen = set()
+    for token, _ in Counter([*english, *chinese]).most_common(limit * 2):
+        if token not in seen and is_useful_tag(token):
+            ranked.append(token)
+            seen.add(token)
+        if len(ranked) >= limit:
+            break
+    return ranked
+
+
+def build_document_level_tags(filename: str, chunks: list[dict], suffix: str) -> list[str]:
+    text = " ".join(
+        [
+            filename,
+            suffix,
+            *[str(keyword) for chunk in chunks[:8] for keyword in chunk.get("keywords", [])],
+            *[str(chunk.get("section_title") or "") for chunk in chunks[:12]],
+        ]
+    )
+    tags = set(extract_document_keywords(text, limit=14))
+    tags.update({"document", suffix})
+    if any(term in text for term in ["教育", "课程", "教学", "education", "learning"]):
+        tags.update({"education", "教学"})
+    if any(term in text for term in ["计算机", "人工智能", "算法", "computer", "software", "ai"]):
+        tags.update({"computer", "计算机"})
+    if any(term in text for term in ["春天", "花", "柳树", "温暖", "spring"]):
+        tags.update({"春天", "spring"})
+    return sorted(tag for tag in tags if is_useful_tag(tag))[:24]
+
+
+def normalize_document_content_query(query: str) -> str:
+    cleaned = str(query or "")
+    format_words = [
+        "的文档",
+        "文档",
+        "文章",
+        "报告",
+        "资料",
+        "正文",
+        "文件",
+        "论文",
+        "计划书",
+        "方案",
+        "pdf",
+        "docx",
+        "pptx",
+        "markdown",
+        "md",
+        "document",
+        "article",
+        "report",
+        "paper",
+        "素材",
+        "资源",
+        "文件",
+        "找点",
+        "找",
+        "搜索",
+        "检索",
+        "查找",
+        "随便",
+        "一些",
+        "点",
+    ]
+    for word in format_words:
+        cleaned = re.sub(re.escape(word), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" 的关于有关有关于")
+    return cleaned
+
+
+def expand_document_query(query: str) -> str:
+    expanded = expand_chinese_query(query)
+    semantic_expansions = {
+        "春天": "春季 花开 柳树 温暖 万物复苏 spring blossom warm season",
+        "春季": "春天 花开 柳树 温暖 spring",
+        "计算机教育": "信息技术课程 编程 教学 人工智能 computer education curriculum programming",
+        "计算机": "computer software algorithm programming information technology",
+        "教育": "teaching learning curriculum school education",
+        "答辩": "presentation report ppt slide defense project",
+        "项目": "system design implementation experiment evaluation",
+        "接口": "api endpoint request response integration",
+        "ocr": "text extraction subtitle image text",
+        "asr": "speech transcript audio whisper",
+    }
+    additions = [value for key, value in semantic_expansions.items() if key.lower() in query.lower()]
+    if additions:
+        return " ".join([expanded, *additions])
+    return expanded
+
+
+def document_keyword_match(query: str, chunk: dict) -> tuple[float, list[str]]:
+    text = " ".join(
+        [
+            str(chunk.get("section_title") or ""),
+            str(chunk.get("summary") or ""),
+            str(chunk.get("text") or ""),
+            " ".join(str(item) for item in chunk.get("keywords") or []),
+        ]
+    ).lower()
+    terms = extract_document_keywords(query, limit=24)
+    terms.extend(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{1,}", query.lower()))
+    terms.extend(re.findall(r"[\u4e00-\u9fff]{2,8}", query))
+    terms.extend(chinese_query_terms(query))
+    unique_terms = []
+    for term in terms:
+        if term and term not in unique_terms:
+            unique_terms.append(term)
+    hits = [term for term in unique_terms if term.lower() in text]
+    if not unique_terms:
+        return 0.0, []
+    return min(len(hits) / min(len(unique_terms), 10), 1.0), hits[:10]
+
+
+def chinese_query_terms(query: str) -> list[str]:
+    terms = []
+    for block in re.findall(r"[\u4e00-\u9fff]{2,}", str(query or "")):
+        for size in [4, 3, 2]:
+            if len(block) < size:
+                continue
+            for index in range(0, len(block) - size + 1):
+                term = block[index : index + size]
+                if term not in {"什么", "一下", "这个", "那个", "需要", "可以", "文章"}:
+                    terms.append(term)
+    return unique_text(terms)
+
+
+def highlight_document_snippet(text: str, query: str, max_chars: int = 260) -> str:
+    clean = " ".join(str(text or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    terms = extract_document_keywords(query, limit=8)
+    positions = [clean.lower().find(term.lower()) for term in terms if clean.lower().find(term.lower()) >= 0]
+    if positions:
+        center = min(positions)
+        start = max(center - max_chars // 3, 0)
+        end = min(start + max_chars, len(clean))
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(clean) else ""
+        return prefix + clean[start:end].strip() + suffix
+    return clean[:max_chars].rstrip() + "..."
+
+
+def build_document_match_reason(keyword_hits: list[str], chunk: dict) -> str:
+    reasons = []
+    section = str(chunk.get("section_title") or "")
+    if section:
+        reasons.append(f"命中章节：{section}")
+    if keyword_hits:
+        reasons.append("关键词/语义词：" + "、".join(keyword_hits[:6]))
+    if not reasons:
+        reasons.append("chunk 向量与查询语义接近")
+    return "；".join(reasons)
 
 
 def extract_document_text(path: Path) -> str:

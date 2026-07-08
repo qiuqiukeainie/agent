@@ -930,6 +930,259 @@ aside,
   padding: 4px 0;
 }
 
+.chat-panel {
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #fbfcfe;
+  overflow: hidden;
+}
+
+.floating-chat {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 40px));
+  display: grid;
+  grid-template-rows: auto minmax(180px, 1fr) auto auto;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.2);
+}
+
+.chat-panel[hidden],
+.clarification-hint[hidden] {
+  display: none;
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e5eaf0;
+  background: #f6f8fb;
+}
+
+.chat-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-text {
+  border: 0;
+  background: transparent;
+  color: #52616f;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.btn-text:hover {
+  background: #e9eef5;
+  color: #152333;
+}
+
+.chat-messages {
+  min-height: 220px;
+  max-height: 460px;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-bubble {
+  max-width: min(760px, 88%);
+  padding: 9px 12px;
+  border-radius: 8px;
+  line-height: 1.55;
+  font-size: 14px;
+}
+
+.chat-bubble.user {
+  align-self: flex-end;
+  background: #dfeefa;
+  color: #172b3a;
+}
+
+.chat-bubble.agent {
+  align-self: flex-start;
+  background: #e6f2ea;
+  color: #183426;
+}
+
+.bubble-label {
+  margin-bottom: 3px;
+  color: #52616f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bubble-meta {
+  margin-top: 5px;
+  color: #607080;
+  font-size: 12px;
+}
+
+.clarification-hint {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 0 14px 14px;
+  padding: 9px 12px;
+  border: 1px solid #ecd27b;
+  border-radius: 8px;
+  background: #fff8dd;
+  color: #594400;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid #e5eaf0;
+  background: #fff;
+}
+
+.chat-input-row input {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid #d8e0e7;
+  border-radius: 7px;
+  padding: 0 10px;
+}
+
+.chat-input-row button,
+.chat-fab {
+  border: 0;
+  border-radius: 7px;
+  background: #1d6f62;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.chat-input-row button {
+  height: 38px;
+  padding: 0 14px;
+}
+
+.chat-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 39;
+  height: 44px;
+  padding: 0 18px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+}
+
+.chat-fab[hidden] {
+  display: none;
+}
+
+.document-work-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.document-searchbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.document-searchbar input,
+.document-searchbar select {
+  height: 42px;
+  min-width: 0;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: white;
+  color: #18202a;
+  padding: 0 12px;
+  font-size: 14px;
+}
+
+.document-answer {
+  display: grid;
+  gap: 10px;
+}
+
+.document-answer:empty {
+  display: none;
+}
+
+.document-answer-card,
+.document-result-card {
+  border: 1px solid #dfe4ea;
+  border-radius: 8px;
+  background: white;
+  padding: 14px;
+}
+
+.document-answer-card p {
+  margin-top: 8px;
+  color: #344054;
+  line-height: 1.65;
+}
+
+.document-result-list {
+  display: grid;
+  gap: 10px;
+}
+
+.document-result-card {
+  cursor: pointer;
+}
+
+.document-result-card:hover {
+  border-color: #1d6f62;
+}
+
+.document-result-head,
+.document-result-meta,
+.document-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.document-result-head {
+  justify-content: space-between;
+}
+
+.document-result-head small {
+  color: #1d6f62;
+  font-weight: 700;
+}
+
+.document-result-meta {
+  margin-top: 8px;
+  color: #657284;
+  font-size: 13px;
+}
+
+.document-result-card p {
+  margin: 10px 0;
+  color: #344054;
+  line-height: 1.6;
+}
+
+.document-keywords em {
+  border-radius: 999px;
+  background: #eef6f3;
+  color: #1d6f62;
+  padding: 3px 8px;
+  font-style: normal;
+  font-size: 12px;
+}
+
 .asset-dialog {
   width: min(980px, calc(100vw - 36px));
   max-height: calc(100vh - 36px);
@@ -1398,6 +1651,10 @@ aside,
 
   .library-tools select {
     width: 100%;
+  }
+
+  .document-searchbar {
+    grid-template-columns: 1fr;
   }
 
   .dialog-content,
